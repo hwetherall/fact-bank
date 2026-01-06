@@ -1,0 +1,5358 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env.example
+.gitignore
+cli.py
+data/input/.gitkeep
+data/output/.gitkeep
+README.md
+requirements.txt
+src/__init__.py
+src/config.py
+src/extraction/__init__.py
+src/extraction/excel_parser.py
+src/extraction/fact_extractor.py
+src/extraction/normalizer.py
+src/extraction/pdf_parser.py
+src/scoring/__init__.py
+src/scoring/scorer.py
+src/storage/__init__.py
+src/storage/models.py
+src/storage/repository.py
+src/utils/__init__.py
+src/utils/embeddings.py
+src/utils/llm_client.py
+streamlit_app.py
+tests/__init__.py
+tests/test_embeddings.py
+tests/test_extraction.py
+tests/test_repository.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".env.example">
+# OpenRouter API Key (required for LLM calls and embeddings)
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+
+# Groq API Key (optional, for fast inference with open-source models)
+GROQ_API_KEY=your_groq_api_key_here
+
+# Database path (optional, defaults to data/factor.db)
+DATABASE_PATH=data/factor.db
+
+# Default LLM provider: openrouter or groq
+DEFAULT_LLM_PROVIDER=openrouter
+
+# Default model for fact extraction
+DEFAULT_EXTRACTION_MODEL=anthropic/claude-3.5-sonnet
+
+# Default embedding model (OpenRouter)
+DEFAULT_EMBEDDING_MODEL=openai/text-embedding-3-small
+</file>
+
+<file path=".gitignore">
+# Environment
+.env
+venv/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Data files (keep structure, ignore contents)
+data/input/*
+!data/input/.gitkeep
+data/output/*
+!data/output/.gitkeep
+</file>
+
+<file path="cli.py">
+"""
+Factor CLI - Command line interface for testing and utilities.
+
+Usage:
+    python cli.py extract <file_path> [--source-type TYPE]
+    python cli.py stats
+    python cli.py clear
+"""
+
+import asyncio
+import argparse
+import sys
+from pathlib import Path
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import print as rprint
+
+from src.config import Config
+from src.storage.repository import FactRepository
+from src.storage.models import SourceType, STANDARD_CHAPTERS
+from src.extraction.pdf_parser import extract_pdf
+from src.extraction.excel_parser import extract_excel
+from src.extraction.fact_extractor import FactExtractor
+from src.utils.embeddings import deduplicate_facts
+from src.scoring.scorer import get_chapter_summary
+
+console = Console()
+
+
+def cmd_stats(args):
+    """Display database statistics."""
+    repo = FactRepository()
+    stats = repo.get_statistics()
+    
+    # Header
+    console.print(Panel.fit(
+        "[bold blue]Factor Fact Bank Statistics[/bold blue]",
+        border_style="blue"
+    ))
+    
+    # Main stats table
+    stats_table = Table(show_header=False, box=None)
+    stats_table.add_column("Metric", style="cyan")
+    stats_table.add_column("Value", style="green")
+    
+    stats_table.add_row("Total Documents", str(stats['total_documents']))
+    stats_table.add_row("Total Facts", str(stats['total_facts']))
+    stats_table.add_row("Average Confidence", f"{stats['average_confidence']:.1%}")
+    
+    console.print(stats_table)
+    console.print()
+    
+    # Importance breakdown
+    if stats['total_facts'] > 0:
+        importance_table = Table(title="Importance Breakdown")
+        importance_table.add_column("Level", style="cyan")
+        importance_table.add_column("Count", style="green")
+        importance_table.add_column("Percentage", style="yellow")
+        
+        total = sum(stats['importance_breakdown'].values())
+        for level in ['high', 'medium', 'low']:
+            count = stats['importance_breakdown'].get(level, 0)
+            pct = count / total * 100 if total > 0 else 0
+            importance_table.add_row(
+                level.upper(),
+                str(count),
+                f"{pct:.1f}%"
+            )
+        
+        console.print(importance_table)
+        console.print()
+        
+        # Chapter summary
+        facts = repo.get_all_facts()
+        chapter_stats = get_chapter_summary(facts)
+        
+        chapter_table = Table(title="Chapter Coverage")
+        chapter_table.add_column("Chapter", style="cyan")
+        chapter_table.add_column("Facts", style="green")
+        chapter_table.add_column("High", style="red")
+        chapter_table.add_column("Medium", style="yellow")
+        chapter_table.add_column("Low", style="dim")
+        
+        for chapter in STANDARD_CHAPTERS:
+            cs = chapter_stats[chapter]
+            chapter_table.add_row(
+                chapter,
+                str(cs['fact_count']),
+                str(cs['importance_breakdown']['high']),
+                str(cs['importance_breakdown']['medium']),
+                str(cs['importance_breakdown']['low']),
+            )
+        
+        console.print(chapter_table)
+
+
+async def async_extract(file_path: Path, source_type: SourceType, run_dedup: bool):
+    """Async extraction logic."""
+    repo = FactRepository()
+    
+    # Extract document
+    console.print(f"[cyan]Extracting content from:[/cyan] {file_path.name}")
+    
+    file_ext = file_path.suffix.lower()
+    if file_ext == ".pdf":
+        doc = extract_pdf(file_path)
+    elif file_ext in (".xlsx", ".xls"):
+        doc = extract_excel(file_path)
+    else:
+        console.print(f"[red]Unsupported file type:[/red] {file_ext}")
+        return
+    
+    console.print(f"[green]✓[/green] Extracted {len(doc.sections)} sections")
+    
+    # Extract facts
+    console.print("[cyan]Extracting facts with LLM...[/cyan]")
+    
+    extractor = FactExtractor()
+    try:
+        facts = await extractor.extract_facts(doc, source_type)
+        console.print(f"[green]✓[/green] Extracted {len(facts)} facts")
+        
+        # Deduplication
+        if run_dedup and len(facts) > 1:
+            console.print("[cyan]Running deduplication...[/cyan]")
+            original_count = len(facts)
+            facts = await deduplicate_facts(facts)
+            merged = original_count - len(facts)
+            if merged > 0:
+                console.print(f"[green]✓[/green] Merged {merged} duplicate facts")
+        
+        # Store in database
+        repo.insert_facts(facts)
+        console.print(f"[green]✓[/green] Stored {len(facts)} facts in database")
+        
+        # Display sample
+        if facts:
+            console.print()
+            sample_table = Table(title="Sample Extracted Facts (first 5)")
+            sample_table.add_column("Content", style="white", max_width=60)
+            sample_table.add_column("Importance", style="cyan")
+            sample_table.add_column("Confidence", style="green")
+            
+            for fact in facts[:5]:
+                content = fact.content[:80] + "..." if len(fact.content) > 80 else fact.content
+                sample_table.add_row(
+                    content,
+                    fact.importance.upper(),
+                    f"{fact.confidence:.0%}"
+                )
+            
+            console.print(sample_table)
+            
+    finally:
+        await extractor.close()
+
+
+def cmd_extract(args):
+    """Extract facts from a document."""
+    file_path = Path(args.file_path)
+    
+    if not file_path.exists():
+        console.print(f"[red]Error:[/red] File not found: {file_path}")
+        sys.exit(1)
+    
+    # Validate API key
+    config_issues = Config.validate()
+    if config_issues:
+        console.print("[red]Configuration Error:[/red]")
+        for issue in config_issues:
+            console.print(f"  - {issue}")
+        console.print("\nPlease set up your .env file with required API keys.")
+        sys.exit(1)
+    
+    # Parse source type
+    source_type_map = {
+        "presentation": SourceType.COMPANY_PRESENTATION,
+        "company": SourceType.COMPANY_PRESENTATION,
+        "market": SourceType.MARKET_RESEARCH,
+        "research": SourceType.MARKET_RESEARCH,
+        "financial": SourceType.FINANCIALS,
+        "financials": SourceType.FINANCIALS,
+    }
+    
+    source_type = source_type_map.get(
+        args.source_type.lower(),
+        SourceType.COMPANY_PRESENTATION
+    )
+    
+    # Run extraction
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            async_extract(file_path, source_type, not args.no_dedup)
+        )
+    finally:
+        loop.close()
+
+
+def cmd_clear(args):
+    """Clear all data from the database."""
+    repo = FactRepository()
+    
+    if not args.yes:
+        confirm = input("Are you sure you want to clear all facts? [y/N] ")
+        if confirm.lower() != 'y':
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+    
+    repo.clear_all_facts()
+    console.print("[green]✓[/green] Database cleared")
+
+
+def cmd_list(args):
+    """List facts in the database."""
+    repo = FactRepository()
+    facts = repo.get_all_facts()
+    
+    if not facts:
+        console.print("[yellow]No facts in database[/yellow]")
+        return
+    
+    # Apply filters
+    if args.importance:
+        facts = [f for f in facts if f.importance == args.importance.lower()]
+    
+    if args.chapter:
+        facts = [f for f in facts if f.chapter_relevance.get(args.chapter, 0) >= 0.5]
+    
+    if args.search:
+        search_lower = args.search.lower()
+        facts = [f for f in facts if search_lower in f.content.lower()]
+    
+    # Limit
+    limit = args.limit or 20
+    facts = facts[:limit]
+    
+    # Display
+    table = Table(title=f"Facts ({len(facts)} shown)")
+    table.add_column("ID", style="dim", width=8)
+    table.add_column("Content", style="white", max_width=50)
+    table.add_column("Source", style="cyan", max_width=15)
+    table.add_column("Imp", style="yellow", width=6)
+    table.add_column("Conf", style="green", width=5)
+    
+    for fact in facts:
+        content = fact.content[:60] + "..." if len(fact.content) > 60 else fact.content
+        source = fact.source_documents[0][:15] if fact.source_documents else ""
+        table.add_row(
+            fact.id[:8],
+            content,
+            source,
+            fact.importance[0].upper(),
+            f"{fact.confidence:.0%}"
+        )
+    
+    console.print(table)
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description="Factor CLI - Fact Bank Management",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    # Extract command
+    extract_parser = subparsers.add_parser("extract", help="Extract facts from a document")
+    extract_parser.add_argument("file_path", help="Path to PDF or Excel file")
+    extract_parser.add_argument(
+        "--source-type", "-t",
+        default="presentation",
+        choices=["presentation", "company", "market", "research", "financial", "financials"],
+        help="Type of source document"
+    )
+    extract_parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Skip deduplication"
+    )
+    
+    # Stats command
+    subparsers.add_parser("stats", help="Display database statistics")
+    
+    # List command
+    list_parser = subparsers.add_parser("list", help="List facts in database")
+    list_parser.add_argument("--importance", "-i", choices=["high", "medium", "low"])
+    list_parser.add_argument("--chapter", "-c", choices=STANDARD_CHAPTERS)
+    list_parser.add_argument("--search", "-s", help="Search in content")
+    list_parser.add_argument("--limit", "-n", type=int, help="Max facts to show")
+    
+    # Clear command
+    clear_parser = subparsers.add_parser("clear", help="Clear all data from database")
+    clear_parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    
+    args = parser.parse_args()
+    
+    if args.command == "extract":
+        cmd_extract(args)
+    elif args.command == "stats":
+        cmd_stats(args)
+    elif args.command == "list":
+        cmd_list(args)
+    elif args.command == "clear":
+        cmd_clear(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="data/input/.gitkeep">
+
+</file>
+
+<file path="data/output/.gitkeep">
+
+</file>
+
+<file path="README.md">
+# Factor — Fact Bank System
+
+Factor is a Fact Bank system designed to solve the "10 Favourite Facts" problem in AI-generated investment memos. When LLMs generate long-form analytical documents, they tend to over-index on a handful of salient facts, repeating them excessively. Factor solves this by extracting facts from source documents into a structured table, scoring them on multiple dimensions, and tracking their usage to ensure diversity in downstream generation.
+
+## Stage 1: Document Ingestion to Fact Bank
+
+This is Stage 1 of the project, focused on:
+- Document ingestion (PDF and Excel files)
+- Fact extraction using LLMs (via OpenRouter/Groq)
+- Scoring on confidence, importance, and chapter relevance
+- Deduplication using embeddings
+- Display via Streamlit UI
+
+## Setup
+
+### 1. Create Virtual Environment
+
+```bash
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# macOS/Linux
+source venv/bin/activate
+```
+
+### 2. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Configure Environment Variables
+
+Copy the example environment file and add your API keys:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and add your OpenRouter and Groq API keys.
+
+### 4. Run the Application
+
+```bash
+streamlit run streamlit_app.py
+```
+
+## Project Structure
+
+```
+Faktor/
+├── src/
+│   ├── extraction/          # Document parsing and fact extraction
+│   │   ├── pdf_parser.py    # PyMuPDF extraction
+│   │   ├── excel_parser.py  # pandas/openpyxl extraction
+│   │   ├── normalizer.py    # Unified content format
+│   │   └── fact_extractor.py # LLM-based fact extraction
+│   ├── scoring/
+│   │   └── scorer.py        # Confidence, importance, relevance scoring
+│   ├── storage/
+│   │   ├── models.py        # Pydantic data models
+│   │   └── repository.py    # SQLite repository
+│   └── utils/
+│       ├── llm_client.py    # OpenRouter/Groq abstraction
+│       └── embeddings.py    # Embedding and deduplication
+├── data/
+│   ├── input/               # Upload documents here
+│   └── output/              # Exported data
+├── tests/
+├── streamlit_app.py         # Demo UI
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
+## Fact Schema
+
+Each extracted fact contains:
+- **id**: Unique identifier (UUID)
+- **content**: The atomic fact (single claim)
+- **source_documents**: List of source filenames
+- **source_type**: company_presentation, market_research, or financials
+- **confidence**: 0.0-1.0 based on source reliability
+- **importance**: high, medium, or low
+- **chapter_relevance**: Relevance scores for 10 standard chapters
+- **usage_count**: Tracking for downstream generation (Stage 2)
+
+## Standard Chapters
+
+Facts are scored for relevance to these investment memo chapters:
+
+1. **Opportunity Validation** — Customer need, demand evidence, market timing
+2. **Product & Technology** — What's being built, technical feasibility, IP
+3. **Market Research** — Market size, structure, dynamics, trends
+4. **Competitive Analysis** — Competitive landscape, positioning, differentiation
+5. **Revenue Model** — How money is made, pricing, unit economics
+6. **Go-to-Market** — Customer acquisition, sales strategy, channels
+7. **Unit Economics** — CAC, LTV, margins, payback period, key metrics
+8. **Finance & Operations** — Financial projections, assumptions, capital needs
+9. **Talent & Team** — Team capabilities, leadership, hiring plans
+10. **Legal & IP** — Corporate structure, compliance, intellectual property
+
+## License
+
+Proprietary - Innovera
+</file>
+
+<file path="requirements.txt">
+streamlit>=1.29.0
+pymupdf>=1.23.0
+pandas>=2.1.0
+openpyxl>=3.1.0
+httpx>=0.25.0
+python-dotenv>=1.0.0
+numpy>=1.24.0
+rich>=13.0.0
+pydantic>=2.5.0
+pytest>=7.4.0
+</file>
+
+<file path="src/__init__.py">
+"""Factor - Fact Bank System for Investment Memos"""
+
+__version__ = "0.1.0"
+</file>
+
+<file path="src/config.py">
+"""
+Configuration management for Factor.
+
+Centralizes environment variable loading and application settings.
+"""
+
+import os
+import logging
+from pathlib import Path
+from typing import Literal
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+
+class Config:
+    """Application configuration."""
+    
+    # API Keys
+    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    
+    # Database
+    DATABASE_PATH: str = os.getenv("DATABASE_PATH", "data/factor.db")
+    
+    # LLM Settings
+    DEFAULT_LLM_PROVIDER: Literal["openrouter", "groq"] = os.getenv(
+        "DEFAULT_LLM_PROVIDER", "openrouter"
+    )  # type: ignore
+    DEFAULT_EXTRACTION_MODEL: str = os.getenv(
+        "DEFAULT_EXTRACTION_MODEL", "anthropic/claude-3.5-sonnet"
+    )
+    DEFAULT_EMBEDDING_MODEL: str = os.getenv(
+        "DEFAULT_EMBEDDING_MODEL", "openai/text-embedding-3-small"
+    )
+    
+    # Extraction Settings
+    DEDUP_SIMILARITY_THRESHOLD: float = float(os.getenv("DEDUP_SIMILARITY_THRESHOLD", "0.85"))
+    MAX_FACTS_PER_DOCUMENT: int = int(os.getenv("MAX_FACTS_PER_DOCUMENT", "500"))
+    # Chunk size for document processing (in characters, ~4 chars = 1 token)
+    CHUNK_SIZE_CHARS: int = int(os.getenv("CHUNK_SIZE_CHARS", "40000"))
+    
+    # Logging
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+    @classmethod
+    def validate(cls) -> list[str]:
+        """
+        Validate configuration and return any issues.
+        
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        issues = []
+        
+        if not cls.OPENROUTER_API_KEY:
+            issues.append("OPENROUTER_API_KEY is not set")
+        
+        return issues
+    
+    @classmethod
+    def is_valid(cls) -> bool:
+        """Check if configuration is valid for operation."""
+        return len(cls.validate()) == 0
+    
+    @classmethod
+    def setup_logging(cls, level: str | None = None):
+        """
+        Configure application logging.
+        
+        Args:
+            level: Optional override for log level
+        """
+        log_level = level or cls.LOG_LEVEL
+        
+        # Configure root logger
+        logging.basicConfig(
+            level=getattr(logging, log_level.upper(), logging.INFO),
+            format=cls.LOG_FORMAT,
+        )
+        
+        # Reduce noise from third-party libraries
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+# Singleton config instance
+config = Config()
+
+
+def get_config() -> Config:
+    """Get the configuration instance."""
+    return config
+</file>
+
+<file path="src/extraction/__init__.py">
+"""Document extraction and fact parsing modules."""
+
+from .pdf_parser import extract_pdf
+from .excel_parser import extract_excel
+from .normalizer import ExtractedDocument, Section, ContentType, normalize_to_prompt
+from .fact_extractor import FactExtractor, SyncFactExtractor
+
+__all__ = [
+    "extract_pdf",
+    "extract_excel", 
+    "ExtractedDocument",
+    "Section",
+    "ContentType",
+    "normalize_to_prompt",
+    "FactExtractor",
+    "SyncFactExtractor",
+]
+</file>
+
+<file path="src/extraction/excel_parser.py">
+"""
+Excel document parser using pandas and openpyxl.
+
+Extracts data from Excel spreadsheets and converts to markdown tables.
+"""
+
+import logging
+from pathlib import Path
+from typing import BinaryIO
+
+import pandas as pd
+
+from .normalizer import ExtractedDocument, ContentType
+
+logger = logging.getLogger(__name__)
+
+
+def extract_excel(
+    file_path: str | Path | BinaryIO, 
+    filename: str | None = None
+) -> ExtractedDocument:
+    """
+    Extract data from an Excel file.
+    
+    Args:
+        file_path: Path to the Excel file or file-like object
+        filename: Original filename (required if file_path is BinaryIO)
+        
+    Returns:
+        ExtractedDocument with all sheets as table sections
+    """
+    # Determine filename and file type
+    if isinstance(file_path, (str, Path)):
+        file_path = Path(file_path)
+        filename = filename or file_path.name
+        file_type = file_path.suffix.lower().lstrip(".")
+    else:
+        # File-like object
+        if filename is None:
+            filename = "uploaded.xlsx"
+        file_type = filename.split(".")[-1].lower() if "." in filename else "xlsx"
+    
+    # Ensure valid file type
+    if file_type not in ("xlsx", "xls"):
+        file_type = "xlsx"
+    
+    extracted = ExtractedDocument(
+        filename=filename,
+        file_type=file_type,
+    )
+    
+    logger.info(f"Processing Excel file: {filename}")
+    
+    try:
+        # Read all sheets
+        excel_file = pd.ExcelFile(file_path, engine="openpyxl" if file_type == "xlsx" else "xlrd")
+        sheet_names = excel_file.sheet_names
+        extracted.total_pages = len(sheet_names)
+        
+        for sheet_name in sheet_names:
+            # Read sheet into DataFrame
+            df = pd.read_excel(
+                excel_file, 
+                sheet_name=sheet_name,
+                header=0,  # Use first row as header
+            )
+            
+            # Skip empty sheets
+            if df.empty:
+                logger.debug(f"Skipping empty sheet: {sheet_name}")
+                continue
+            
+            # Clean the DataFrame
+            df = _clean_dataframe(df)
+            
+            if df.empty:
+                continue
+            
+            # Convert to markdown
+            markdown_table = _dataframe_to_markdown(df)
+            
+            if markdown_table:
+                extracted.add_section(
+                    content=markdown_table,
+                    content_type=ContentType.TABLE,
+                    page_or_sheet=sheet_name,
+                    title=sheet_name,
+                )
+        
+        excel_file.close()
+        
+    except Exception as e:
+        logger.error(f"Error processing Excel file {filename}: {e}")
+        raise
+    
+    logger.info(
+        f"Extracted {len(extracted.sections)} sheets from {filename}"
+    )
+    
+    return extracted
+
+
+def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean a DataFrame for better extraction.
+    
+    - Remove completely empty rows and columns
+    - Clean up column names
+    - Handle NaN values
+    """
+    # Remove completely empty rows
+    df = df.dropna(how="all")
+    
+    # Remove completely empty columns
+    df = df.dropna(axis=1, how="all")
+    
+    if df.empty:
+        return df
+    
+    # Clean column names
+    df.columns = [_clean_column_name(col) for col in df.columns]
+    
+    # Fill NaN with empty string for display
+    df = df.fillna("")
+    
+    # Convert all values to strings and clean
+    for col in df.columns:
+        df[col] = df[col].apply(_clean_cell_value)
+    
+    # Remove rows that are all empty strings
+    df = df[~(df == "").all(axis=1)]
+    
+    return df
+
+
+def _clean_column_name(name) -> str:
+    """Clean a column name."""
+    if pd.isna(name):
+        return "Column"
+    
+    name_str = str(name).strip()
+    
+    # Handle unnamed columns
+    if name_str.startswith("Unnamed:"):
+        return "Column"
+    
+    # Remove newlines and excessive whitespace
+    name_str = " ".join(name_str.split())
+    
+    # Escape pipe characters for markdown
+    name_str = name_str.replace("|", "\\|")
+    
+    return name_str
+
+
+def _clean_cell_value(value) -> str:
+    """Clean a cell value for display."""
+    # Handle Series objects (can occur with merged cells or complex structures)
+    if isinstance(value, pd.Series):
+        # Convert Series to its first value or string representation
+        if len(value) == 1:
+            value = value.iloc[0]
+        else:
+            value = value.to_string(index=False)
+    
+    # Now safely check for NA - use try/except to handle edge cases
+    try:
+        is_na = pd.isna(value)
+        # If is_na is not a scalar bool, treat as non-NA
+        if not isinstance(is_na, bool):
+            is_na = False
+    except (ValueError, TypeError):
+        is_na = False
+    
+    if is_na or value == "":
+        return ""
+    
+    value_str = str(value).strip()
+    
+    # Handle floats that are actually integers
+    if isinstance(value, float) and value.is_integer():
+        value_str = str(int(value))
+    
+    # Remove newlines
+    value_str = " ".join(value_str.split())
+    
+    # Escape pipe characters for markdown
+    value_str = value_str.replace("|", "\\|")
+    
+    # Truncate very long values
+    if len(value_str) > 200:
+        value_str = value_str[:197] + "..."
+    
+    return value_str
+
+
+def _dataframe_to_markdown(df: pd.DataFrame) -> str:
+    """
+    Convert a DataFrame to a markdown table.
+    
+    Args:
+        df: The DataFrame to convert
+        
+    Returns:
+        Markdown table string
+    """
+    if df.empty:
+        return ""
+    
+    lines = []
+    
+    # Header row
+    headers = list(df.columns)
+    lines.append("| " + " | ".join(headers) + " |")
+    
+    # Separator
+    lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+    
+    # Data rows (limit to 500 rows to avoid huge outputs)
+    max_rows = 500
+    if len(df) > max_rows:
+        logger.warning(f"DataFrame has {len(df)} rows, truncating to {max_rows}")
+    
+    for _, row in df.head(max_rows).iterrows():
+        row_values = [str(v) for v in row.values]
+        lines.append("| " + " | ".join(row_values) + " |")
+    
+    if len(df) > max_rows:
+        lines.append(f"| ... | *{len(df) - max_rows} more rows truncated* |")
+    
+    return "\n".join(lines)
+
+
+def extract_excel_metadata(file_path: str | Path) -> dict:
+    """
+    Extract metadata from an Excel file.
+    
+    Args:
+        file_path: Path to the Excel file
+        
+    Returns:
+        Dictionary of metadata
+    """
+    file_path = Path(file_path)
+    file_type = file_path.suffix.lower().lstrip(".")
+    
+    excel_file = pd.ExcelFile(
+        file_path, 
+        engine="openpyxl" if file_type == "xlsx" else "xlrd"
+    )
+    
+    sheet_info = {}
+    for sheet_name in excel_file.sheet_names:
+        df = pd.read_excel(excel_file, sheet_name=sheet_name)
+        sheet_info[sheet_name] = {
+            "rows": len(df),
+            "columns": len(df.columns),
+        }
+    
+    excel_file.close()
+    
+    return {
+        "sheet_count": len(excel_file.sheet_names),
+        "sheet_names": excel_file.sheet_names,
+        "sheets": sheet_info,
+    }
+</file>
+
+<file path="src/extraction/fact_extractor.py">
+"""
+Fact extraction using LLMs.
+
+Extracts atomic facts from documents using carefully crafted prompts.
+"""
+
+import json
+import logging
+import uuid
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from src.storage.models import (
+    Fact, 
+    SourceType, 
+    ImportanceLevel,
+    ExtractedFactRaw,
+    FactExtractionResponse,
+    BASE_CONFIDENCE_SCORES,
+    STANDARD_CHAPTERS,
+    CHAPTER_DESCRIPTIONS,
+)
+from src.utils.llm_client import LLMClient, LLMProvider, LLMResponse
+from src.config import Config, get_config
+
+if TYPE_CHECKING:
+    from src.extraction.normalizer import ExtractedDocument
+
+logger = logging.getLogger(__name__)
+
+
+# System prompt for fact extraction
+FACT_EXTRACTION_SYSTEM_PROMPT = """You are an expert fact extractor for investment analysis. Your task is to extract every distinct, atomic fact from the provided document that could be relevant to evaluating a business opportunity.
+
+## Guidelines
+
+### Atomicity
+- Each fact must be a single, verifiable claim
+- Do NOT combine multiple facts into one statement
+- Break compound statements into separate facts
+
+### Precision
+- Preserve exact numbers, dates, percentages, and currency amounts
+- Include specific names of people, companies, and products
+- Maintain units of measurement (e.g., "$4.2M ARR", "15% YoY growth")
+- Use the original terminology from the document
+
+### Neutrality
+- Extract facts as stated, without editorializing or interpreting
+- Do not add qualifiers or judgments
+- Avoid summarizing or paraphrasing that loses specificity
+
+### Completeness
+- Extract ALL investment-relevant facts, including:
+  - Financial metrics (revenue, margins, growth rates, valuations)
+  - Market data (size, growth, trends, segments)
+  - Company information (team, products, customers, partnerships)
+  - Competitive landscape (competitors, market position, moats)
+  - Risks and challenges
+  - Technical capabilities and IP
+  - Legal and regulatory matters
+  - Operational details
+
+### Chapter Relevance
+For each fact, assess its relevance (0.0 to 1.0) to these investment memo chapters:
+- Opportunity Validation: Customer need, demand evidence, market timing, problem-solution fit
+- Product & Technology: What's being built, technical feasibility, IP, product roadmap
+- Market Research: Market size (TAM/SAM/SOM), structure, dynamics, trends, segments
+- Competitive Analysis: Competitive landscape, positioning, differentiation, moats
+- Revenue Model: How money is made, pricing strategy, unit economics, monetization
+- Go-to-Market: Customer acquisition, sales strategy, channels, partnerships
+- Unit Economics: CAC, LTV, margins, payback period, key financial metrics
+- Finance & Operations: Financial projections, assumptions, capital needs, operations
+- Talent & Team: Team capabilities, leadership, hiring plans, culture, advisors
+- Legal & IP: Corporate structure, compliance, intellectual property, contracts
+
+### Importance Rating
+- HIGH: Critical for investment decision (revenue, key risks, market size, competitive moats)
+- MEDIUM: Important context (team background, partnerships, product features)
+- LOW: Supporting details (minor operational info, background context)
+
+### Confidence Adjustment
+Suggest a confidence adjustment from -0.15 to +0.15 based on:
+- +0.10 to +0.15: Highly specific, verifiable data with clear sources
+- +0.05 to +0.10: Specific claims with good supporting context
+- 0.00: Standard factual statements
+- -0.05 to -0.10: Vague or uncertain claims
+- -0.10 to -0.15: Speculative or unverified assertions
+
+## Output Format
+
+Return a JSON object with this exact structure:
+{
+  "facts": [
+    {
+      "content": "The exact fact as a single sentence",
+      "importance": "high" | "medium" | "low",
+      "chapter_relevance": {
+        "Opportunity Validation": 0.0-1.0,
+        "Product & Technology": 0.0-1.0,
+        "Market Research": 0.0-1.0,
+        "Competitive Analysis": 0.0-1.0,
+        "Revenue Model": 0.0-1.0,
+        "Go-to-Market": 0.0-1.0,
+        "Unit Economics": 0.0-1.0,
+        "Finance & Operations": 0.0-1.0,
+        "Talent & Team": 0.0-1.0,
+        "Legal & IP": 0.0-1.0
+      },
+      "confidence_adjustment": -0.15 to 0.15
+    }
+  ]
+}
+
+## Extraction Strategy
+- Extract EVERY distinct fact, even if they seem minor
+- Financial documents should yield 20-50+ facts covering all data points
+- Each number, percentage, date, or metric should be its own fact
+- Break down complex statements into multiple atomic facts
+- Don't summarize - extract the raw data points
+
+Extract comprehensively - it's better to extract more facts than to miss important information."""
+
+
+class FactExtractor:
+    """
+    Extracts facts from documents using LLMs.
+    
+    Usage:
+        extractor = FactExtractor()
+        facts = await extractor.extract_facts(document, source_type)
+    """
+    
+    def __init__(
+        self,
+        llm_client: LLMClient | None = None,
+        model: str | None = None,
+        provider: LLMProvider | str | None = None,
+    ):
+        """
+        Initialize the fact extractor.
+        
+        Args:
+            llm_client: Optional pre-configured LLM client
+            model: Model to use for extraction (defaults to DEFAULT_EXTRACTION_MODEL)
+            provider: LLM provider if creating new client (defaults to DEFAULT_LLM_PROVIDER)
+        """
+        self.llm_client = llm_client
+        self.model = model or Config.DEFAULT_EXTRACTION_MODEL
+        if provider is None:
+            provider = LLMProvider(Config.DEFAULT_LLM_PROVIDER)
+        elif isinstance(provider, str):
+            provider = LLMProvider(provider.lower())
+        self.provider = provider
+        self._owns_client = False
+    
+    async def _get_client(self) -> LLMClient:
+        """Get or create the LLM client."""
+        if self.llm_client is None:
+            self.llm_client = LLMClient(provider=self.provider)
+            self._owns_client = True
+        return self.llm_client
+    
+    # Chunk size for optimal fact extraction (configurable via CHUNK_SIZE_CHARS env var)
+    # With large context models (Gemini 3 Flash = 1M tokens), we can use bigger chunks
+    # But smaller chunks still help the LLM focus and extract more granular facts
+    @property
+    def CHUNK_SIZE_CHARS(self) -> int:
+        return get_config().CHUNK_SIZE_CHARS
+    
+    # Minimum document size before chunking kicks in (~75% of chunk size)
+    @property
+    def MIN_CHUNK_THRESHOLD(self) -> int:
+        return int(get_config().CHUNK_SIZE_CHARS * 0.75)
+    
+    async def extract_facts(
+        self,
+        document: "ExtractedDocument",
+        source_type: SourceType | str,
+    ) -> list[Fact]:
+        """
+        Extract facts from a document.
+        
+        Args:
+            document: The extracted document content
+            source_type: Type of source (affects confidence scoring)
+            
+        Returns:
+            List of extracted facts
+        """
+        from src.extraction.normalizer import normalize_to_prompt
+        
+        if isinstance(source_type, str):
+            source_type = SourceType(source_type)
+        
+        client = await self._get_client()
+        
+        # Prepare the document content for the prompt
+        document_content = normalize_to_prompt(document)
+        
+        logger.info(f"Extracting facts from {document.filename} ({len(document_content)} chars)")
+        
+        # Process in chunks for more thorough extraction
+        # Smaller chunks help the LLM focus and extract more granular facts
+        if len(document_content) > self.MIN_CHUNK_THRESHOLD:
+            logger.info(f"Processing document in chunks for thorough extraction")
+            return await self._extract_facts_chunked(
+                document=document,
+                document_content=document_content,
+                source_type=source_type,
+                client=client,
+            )
+        
+        # For small documents, process in one go
+        messages = [
+            {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Extract ALL facts from this document. Be thorough - extract every data point, number, date, and claim as a separate fact:\n\n{document_content}"},
+        ]
+        
+        response = await client.chat_completion(
+            messages=messages,
+            model=self.model,
+            temperature=0.3,  # Lower temperature for more consistent extraction
+            response_format={"type": "json_object"},
+        )
+        
+        # Parse the response
+        raw_facts = self._parse_response(response)
+        
+        # Convert to Fact objects with proper scoring
+        facts = self._process_raw_facts(
+            raw_facts=raw_facts,
+            source_document=document.filename,
+            source_type=source_type,
+        )
+        
+        logger.info(f"Extracted {len(facts)} facts from {document.filename}")
+        
+        return facts
+    
+    async def _extract_facts_chunked(
+        self,
+        document: "ExtractedDocument",
+        document_content: str,
+        source_type: SourceType,
+        client: LLMClient,
+    ) -> list[Fact]:
+        """
+        Extract facts from a document by processing it in chunks.
+        
+        Smaller chunks help the LLM focus and extract more granular facts.
+        Splits by sections if available, otherwise by character count.
+        """
+        all_facts: list[Fact] = []
+        
+        # Try to split by document sections first
+        if document.sections and len(document.sections) > 1:
+            chunks = self._chunk_by_sections(document)
+        else:
+            chunks = self._chunk_by_size(document_content)
+        
+        logger.info(f"Processing {len(chunks)} chunks for {document.filename}")
+        
+        for i, chunk in enumerate(chunks, 1):
+            logger.info(f"Processing chunk {i}/{len(chunks)} ({len(chunk)} chars)")
+            
+            messages = [
+                {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Extract ALL facts from this document section (part {i} of {len(chunks)}). Be extremely thorough - every number, date, percentage, name, and claim should be a separate fact:\n\n{chunk}"},
+            ]
+            
+            try:
+                response = await client.chat_completion(
+                    messages=messages,
+                    model=self.model,
+                    temperature=0.3,
+                    response_format={"type": "json_object"},
+                )
+                
+                raw_facts = self._parse_response(response)
+                facts = self._process_raw_facts(
+                    raw_facts=raw_facts,
+                    source_document=document.filename,
+                    source_type=source_type,
+                )
+                all_facts.extend(facts)
+                logger.info(f"Extracted {len(facts)} facts from chunk {i}")
+                
+            except Exception as e:
+                logger.error(f"Failed to process chunk {i}: {e}")
+                # Continue with other chunks
+                continue
+        
+        logger.info(f"Extracted {len(all_facts)} total facts from {document.filename}")
+        return all_facts
+    
+    def _chunk_by_sections(self, document: "ExtractedDocument") -> list[str]:
+        """Split document by sections, grouping to stay under chunk size limit."""
+        from src.extraction.normalizer import ContentType
+        
+        chunks = []
+        current_chunk = []
+        current_size = 0
+        
+        for section in document.sections:
+            section_text = f"## {section.title or 'Section'}\n{section.content}\n\n"
+            section_size = len(section_text)
+            
+            if current_size + section_size > self.CHUNK_SIZE_CHARS and current_chunk:
+                # Save current chunk and start new one
+                chunks.append("".join(current_chunk))
+                current_chunk = []
+                current_size = 0
+            
+            # If a single section is too large, split it by size
+            if section_size > self.CHUNK_SIZE_CHARS:
+                if current_chunk:
+                    chunks.append("".join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+                # Split the large section
+                chunks.extend(self._chunk_by_size(section_text))
+            else:
+                current_chunk.append(section_text)
+                current_size += section_size
+        
+        if current_chunk:
+            chunks.append("".join(current_chunk))
+        
+        return chunks
+    
+    def _chunk_by_size(self, content: str) -> list[str]:
+        """Split content by size, trying to break at paragraph boundaries."""
+        chunks = []
+        
+        # Split by double newlines (paragraphs) first
+        paragraphs = content.split("\n\n")
+        
+        current_chunk = []
+        current_size = 0
+        
+        for para in paragraphs:
+            para_with_spacing = para + "\n\n"
+            para_size = len(para_with_spacing)
+            
+            if current_size + para_size > self.CHUNK_SIZE_CHARS and current_chunk:
+                chunks.append("".join(current_chunk))
+                current_chunk = []
+                current_size = 0
+            
+            # If a single paragraph is too large, split it roughly
+            if para_size > self.CHUNK_SIZE_CHARS:
+                if current_chunk:
+                    chunks.append("".join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+                
+                # Split at sentence boundaries or just by size
+                for j in range(0, len(para), self.CHUNK_SIZE_CHARS):
+                    chunks.append(para[j:j + self.CHUNK_SIZE_CHARS])
+            else:
+                current_chunk.append(para_with_spacing)
+                current_size += para_size
+        
+        if current_chunk:
+            chunks.append("".join(current_chunk))
+        
+        return chunks
+    
+    def _parse_response(self, response: LLMResponse) -> list[ExtractedFactRaw]:
+        """Parse the LLM response into raw facts."""
+        try:
+            data = json.loads(response.content)
+            
+            # Validate with Pydantic
+            extraction_response = FactExtractionResponse(**data)
+            return extraction_response.facts
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            logger.debug(f"Response content: {response.content[:500]}")
+            raise ValueError(f"Invalid JSON response from LLM: {e}")
+            
+        except Exception as e:
+            logger.error(f"Failed to parse extraction response: {e}")
+            raise ValueError(f"Failed to parse fact extraction response: {e}")
+    
+    def _process_raw_facts(
+        self,
+        raw_facts: list[ExtractedFactRaw],
+        source_document: str,
+        source_type: SourceType,
+    ) -> list[Fact]:
+        """
+        Process raw facts into final Fact objects.
+        
+        Applies:
+        - UUID generation
+        - Timestamp
+        - Confidence adjustment based on source type
+        """
+        base_confidence = BASE_CONFIDENCE_SCORES.get(source_type, 0.75)
+        timestamp = datetime.utcnow()
+        
+        facts = []
+        for raw in raw_facts:
+            # Apply confidence adjustment
+            adjusted_confidence = base_confidence + raw.confidence_adjustment
+            # Clamp to valid range
+            adjusted_confidence = max(0.0, min(1.0, adjusted_confidence))
+            
+            # Ensure all chapters have scores (default to 0.0)
+            chapter_relevance = {ch: 0.0 for ch in STANDARD_CHAPTERS}
+            chapter_relevance.update(raw.chapter_relevance)
+            
+            fact = Fact(
+                id=str(uuid.uuid4()),
+                content=raw.content,
+                source_documents=[source_document],
+                source_type=source_type,
+                confidence=round(adjusted_confidence, 3),
+                importance=raw.importance,
+                chapter_relevance=chapter_relevance,
+                extraction_timestamp=timestamp,
+                usage_count=0,
+                used_in_chapters=[],
+                embedding=None,
+            )
+            facts.append(fact)
+        
+        return facts
+    
+    async def extract_facts_batch(
+        self,
+        documents: list[tuple["ExtractedDocument", SourceType | str]],
+    ) -> list[Fact]:
+        """
+        Extract facts from multiple documents.
+        
+        Args:
+            documents: List of (document, source_type) tuples
+            
+        Returns:
+            Combined list of all extracted facts
+        """
+        all_facts = []
+        
+        for doc, source_type in documents:
+            try:
+                facts = await self.extract_facts(doc, source_type)
+                all_facts.extend(facts)
+            except Exception as e:
+                logger.error(f"Failed to extract facts from {doc.filename}: {e}")
+                # Continue with other documents
+                continue
+        
+        return all_facts
+    
+    async def close(self):
+        """Close the LLM client if we own it."""
+        if self._owns_client and self.llm_client:
+            await self.llm_client.close()
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+
+# Synchronous wrapper
+class SyncFactExtractor:
+    """Synchronous wrapper for FactExtractor."""
+    
+    def __init__(self, **kwargs):
+        import asyncio
+        self._async_extractor = FactExtractor(**kwargs)
+        self._loop: asyncio.AbstractEventLoop | None = None
+    
+    def _get_loop(self):
+        import asyncio
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            if self._loop is None or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            return self._loop
+    
+    def extract_facts(
+        self,
+        document: "ExtractedDocument",
+        source_type: SourceType | str,
+    ) -> list[Fact]:
+        """Synchronous fact extraction."""
+        loop = self._get_loop()
+        return loop.run_until_complete(
+            self._async_extractor.extract_facts(document, source_type)
+        )
+    
+    def extract_facts_batch(
+        self,
+        documents: list[tuple["ExtractedDocument", SourceType | str]],
+    ) -> list[Fact]:
+        """Synchronous batch extraction."""
+        loop = self._get_loop()
+        return loop.run_until_complete(
+            self._async_extractor.extract_facts_batch(documents)
+        )
+    
+    def close(self):
+        import asyncio
+        if self._loop and not self._loop.is_closed():
+            self._loop.run_until_complete(self._async_extractor.close())
+            self._loop.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+</file>
+
+<file path="src/extraction/normalizer.py">
+"""
+Content normalizer for extracted documents.
+
+Provides unified data structures and formatting for LLM consumption.
+"""
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Literal
+
+
+class ContentType(str, Enum):
+    """Type of content within a document section."""
+    PROSE = "prose"
+    TABLE = "table"
+
+
+@dataclass
+class Section:
+    """
+    A section of extracted content from a document.
+    
+    Attributes:
+        content: The text or table content
+        content_type: Whether this is prose or tabular data
+        page_or_sheet: Page number (PDF) or sheet name (Excel)
+        title: Optional section title if detected
+    """
+    content: str
+    content_type: ContentType
+    page_or_sheet: str | int
+    title: str | None = None
+    
+    def to_markdown(self) -> str:
+        """Convert section to markdown format."""
+        parts = []
+        
+        # Add location header
+        location = f"Page {self.page_or_sheet}" if isinstance(self.page_or_sheet, int) else f"Sheet: {self.page_or_sheet}"
+        parts.append(f"### {location}")
+        
+        if self.title:
+            parts.append(f"**{self.title}**")
+        
+        # Mark content type for LLM clarity
+        if self.content_type == ContentType.TABLE:
+            parts.append("[TABLE DATA]")
+        
+        parts.append(self.content)
+        
+        return "\n".join(parts)
+
+
+@dataclass
+class ExtractedDocument:
+    """
+    A document with all extracted content.
+    
+    Attributes:
+        filename: Original filename
+        file_type: File extension (pdf, xlsx, xls)
+        sections: List of extracted sections
+        total_pages: Number of pages (PDF) or sheets (Excel)
+        metadata: Additional document metadata
+    """
+    filename: str
+    file_type: Literal["pdf", "xlsx", "xls"]
+    sections: list[Section] = field(default_factory=list)
+    total_pages: int | None = None
+    metadata: dict = field(default_factory=dict)
+    
+    def add_section(
+        self,
+        content: str,
+        content_type: ContentType,
+        page_or_sheet: str | int,
+        title: str | None = None,
+    ):
+        """Add a section to the document."""
+        self.sections.append(Section(
+            content=content,
+            content_type=content_type,
+            page_or_sheet=page_or_sheet,
+            title=title,
+        ))
+    
+    def get_full_text(self) -> str:
+        """Get all content as plain text."""
+        return "\n\n".join(s.content for s in self.sections)
+    
+    def get_tables_only(self) -> list[Section]:
+        """Get only table sections."""
+        return [s for s in self.sections if s.content_type == ContentType.TABLE]
+    
+    def get_prose_only(self) -> list[Section]:
+        """Get only prose sections."""
+        return [s for s in self.sections if s.content_type == ContentType.PROSE]
+
+
+def normalize_to_prompt(doc: ExtractedDocument) -> str:
+    """
+    Convert an extracted document to a format suitable for LLM prompts.
+    
+    The output clearly delineates between prose and table content,
+    and includes source information for traceability.
+    
+    Args:
+        doc: The extracted document
+        
+    Returns:
+        Formatted string for LLM consumption
+    """
+    parts = [
+        f"# Document: {doc.filename}",
+        f"**Type:** {doc.file_type.upper()}",
+    ]
+    
+    if doc.total_pages:
+        parts.append(f"**Total Pages/Sheets:** {doc.total_pages}")
+    
+    parts.append("")
+    parts.append("---")
+    parts.append("")
+    
+    # Group sections by type for clarity
+    prose_sections = doc.get_prose_only()
+    table_sections = doc.get_tables_only()
+    
+    if prose_sections:
+        parts.append("## Text Content")
+        parts.append("")
+        for section in prose_sections:
+            parts.append(section.to_markdown())
+            parts.append("")
+    
+    if table_sections:
+        parts.append("## Tabular Data")
+        parts.append("")
+        parts.append("*Note: Tables often contain dense factual information. Pay special attention to numerical data, dates, and named entities.*")
+        parts.append("")
+        for section in table_sections:
+            parts.append(section.to_markdown())
+            parts.append("")
+    
+    return "\n".join(parts)
+
+
+def combine_documents_for_prompt(docs: list[ExtractedDocument]) -> str:
+    """
+    Combine multiple documents into a single prompt.
+    
+    Args:
+        docs: List of extracted documents
+        
+    Returns:
+        Combined prompt string
+    """
+    parts = [
+        "# Source Documents",
+        "",
+        f"The following content has been extracted from {len(docs)} document(s).",
+        "Extract all relevant facts from each document.",
+        "",
+        "---",
+        "",
+    ]
+    
+    for i, doc in enumerate(docs, 1):
+        parts.append(f"## Document {i}: {doc.filename}")
+        parts.append("")
+        parts.append(normalize_to_prompt(doc))
+        parts.append("")
+        parts.append("---")
+        parts.append("")
+    
+    return "\n".join(parts)
+</file>
+
+<file path="src/extraction/pdf_parser.py">
+"""
+PDF document parser using PyMuPDF.
+
+Extracts text and tables from PDF files.
+"""
+
+import logging
+from pathlib import Path
+from typing import BinaryIO
+
+import fitz  # PyMuPDF
+
+from .normalizer import ExtractedDocument, ContentType
+
+logger = logging.getLogger(__name__)
+
+
+def extract_pdf(file_path: str | Path | BinaryIO, filename: str | None = None) -> ExtractedDocument:
+    """
+    Extract text and tables from a PDF file.
+    
+    Args:
+        file_path: Path to the PDF file or file-like object
+        filename: Original filename (required if file_path is BinaryIO)
+        
+    Returns:
+        ExtractedDocument with all content
+    """
+    # Handle different input types
+    if isinstance(file_path, (str, Path)):
+        file_path = Path(file_path)
+        filename = filename or file_path.name
+        doc = fitz.open(str(file_path))
+    else:
+        # File-like object (e.g., from Streamlit upload)
+        if filename is None:
+            filename = "uploaded.pdf"
+        file_bytes = file_path.read()
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    
+    extracted = ExtractedDocument(
+        filename=filename,
+        file_type="pdf",
+        total_pages=len(doc),
+    )
+    
+    logger.info(f"Processing PDF: {filename} ({len(doc)} pages)")
+    
+    for page_num, page in enumerate(doc, 1):
+        # Extract prose text
+        text = page.get_text("text")
+        if text.strip():
+            # Clean up the text
+            cleaned_text = _clean_pdf_text(text)
+            if cleaned_text:
+                extracted.add_section(
+                    content=cleaned_text,
+                    content_type=ContentType.PROSE,
+                    page_or_sheet=page_num,
+                )
+        
+        # Extract tables
+        tables = _extract_tables_from_page(page)
+        for i, table_md in enumerate(tables):
+            extracted.add_section(
+                content=table_md,
+                content_type=ContentType.TABLE,
+                page_or_sheet=page_num,
+                title=f"Table {i + 1}",
+            )
+    
+    doc.close()
+    
+    logger.info(
+        f"Extracted {len(extracted.sections)} sections from {filename} "
+        f"({len(extracted.get_prose_only())} prose, {len(extracted.get_tables_only())} tables)"
+    )
+    
+    return extracted
+
+
+def _clean_pdf_text(text: str) -> str:
+    """
+    Clean extracted PDF text.
+    
+    - Remove excessive whitespace
+    - Fix common OCR issues
+    - Normalize line breaks
+    """
+    lines = text.split("\n")
+    cleaned_lines = []
+    
+    for line in lines:
+        # Strip whitespace
+        line = line.strip()
+        
+        # Skip empty lines in sequence
+        if not line and cleaned_lines and not cleaned_lines[-1]:
+            continue
+        
+        # Skip page numbers and common noise
+        if _is_noise_line(line):
+            continue
+        
+        cleaned_lines.append(line)
+    
+    # Join and normalize
+    result = "\n".join(cleaned_lines)
+    
+    # Remove excessive blank lines
+    while "\n\n\n" in result:
+        result = result.replace("\n\n\n", "\n\n")
+    
+    return result.strip()
+
+
+def _is_noise_line(line: str) -> bool:
+    """Check if a line is likely noise (page numbers, headers, etc.)."""
+    # Empty or very short
+    if len(line) < 3:
+        return True
+    
+    # Pure numbers (likely page numbers)
+    if line.isdigit():
+        return True
+    
+    # Common patterns
+    noise_patterns = [
+        "page ",
+        "confidential",
+        "all rights reserved",
+        "©",
+    ]
+    
+    line_lower = line.lower()
+    return any(pattern in line_lower for pattern in noise_patterns)
+
+
+def _extract_tables_from_page(page: fitz.Page) -> list[str]:
+    """
+    Extract tables from a PDF page and convert to markdown.
+    
+    Uses PyMuPDF's table detection feature.
+    """
+    tables = []
+    
+    try:
+        # Find tables on the page
+        found_tables = page.find_tables()
+        
+        for table in found_tables:
+            # Extract table data
+            data = table.extract()
+            
+            if not data or len(data) < 2:
+                continue
+            
+            # Convert to markdown table
+            markdown = _table_data_to_markdown(data)
+            if markdown:
+                tables.append(markdown)
+                
+    except Exception as e:
+        logger.warning(f"Error extracting tables from page: {e}")
+    
+    return tables
+
+
+def _table_data_to_markdown(data: list[list]) -> str:
+    """
+    Convert table data to markdown format.
+    
+    Args:
+        data: 2D list of cell values
+        
+    Returns:
+        Markdown table string
+    """
+    if not data:
+        return ""
+    
+    # Clean cell values
+    cleaned_data = []
+    for row in data:
+        cleaned_row = []
+        for cell in row:
+            if cell is None:
+                cleaned_row.append("")
+            else:
+                # Clean and truncate long cells
+                cell_str = str(cell).strip().replace("|", "\\|")
+                if len(cell_str) > 100:
+                    cell_str = cell_str[:97] + "..."
+                cleaned_row.append(cell_str)
+        cleaned_data.append(cleaned_row)
+    
+    if not cleaned_data:
+        return ""
+    
+    # Ensure consistent column count
+    max_cols = max(len(row) for row in cleaned_data)
+    for row in cleaned_data:
+        while len(row) < max_cols:
+            row.append("")
+    
+    # Build markdown table
+    lines = []
+    
+    # Header row
+    header = cleaned_data[0]
+    lines.append("| " + " | ".join(header) + " |")
+    
+    # Separator
+    lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+    
+    # Data rows
+    for row in cleaned_data[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+    
+    return "\n".join(lines)
+
+
+def extract_pdf_metadata(file_path: str | Path) -> dict:
+    """
+    Extract metadata from a PDF file.
+    
+    Args:
+        file_path: Path to the PDF file
+        
+    Returns:
+        Dictionary of metadata
+    """
+    doc = fitz.open(str(file_path))
+    
+    metadata = {
+        "page_count": len(doc),
+        "title": doc.metadata.get("title", ""),
+        "author": doc.metadata.get("author", ""),
+        "subject": doc.metadata.get("subject", ""),
+        "creator": doc.metadata.get("creator", ""),
+        "creation_date": doc.metadata.get("creationDate", ""),
+    }
+    
+    doc.close()
+    return metadata
+</file>
+
+<file path="src/scoring/__init__.py">
+"""Scoring modules for facts."""
+
+from .scorer import FactScorer, apply_confidence_adjustment
+
+__all__ = ["FactScorer", "apply_confidence_adjustment"]
+</file>
+
+<file path="src/scoring/scorer.py">
+"""
+Scoring logic for facts.
+
+Handles confidence, importance, and chapter relevance scoring.
+"""
+
+import logging
+from typing import TYPE_CHECKING
+
+from src.storage.models import (
+    Fact,
+    SourceType,
+    ImportanceLevel,
+    BASE_CONFIDENCE_SCORES,
+    STANDARD_CHAPTERS,
+)
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
+class FactScorer:
+    """
+    Scores and validates facts.
+    
+    Provides utilities for:
+    - Confidence adjustment based on source type
+    - Importance validation and normalization
+    - Chapter relevance scoring
+    """
+    
+    def __init__(self):
+        """Initialize the scorer."""
+        self.base_confidence_scores = BASE_CONFIDENCE_SCORES.copy()
+        self.standard_chapters = STANDARD_CHAPTERS.copy()
+    
+    def apply_confidence_adjustment(
+        self,
+        fact: Fact,
+        adjustment: float = 0.0,
+    ) -> Fact:
+        """
+        Apply a confidence adjustment to a fact.
+        
+        Args:
+            fact: The fact to adjust
+            adjustment: Adjustment value (-0.15 to 0.15)
+            
+        Returns:
+            Updated fact with adjusted confidence
+        """
+        # Clamp adjustment
+        adjustment = max(-0.15, min(0.15, adjustment))
+        
+        new_confidence = fact.confidence + adjustment
+        new_confidence = max(0.0, min(1.0, new_confidence))
+        
+        fact.confidence = round(new_confidence, 3)
+        return fact
+    
+    def recalculate_confidence(
+        self,
+        fact: Fact,
+        source_type: SourceType | None = None,
+    ) -> Fact:
+        """
+        Recalculate confidence based on source type.
+        
+        Args:
+            fact: The fact to update
+            source_type: Optional override for source type
+            
+        Returns:
+            Updated fact with recalculated confidence
+        """
+        if source_type is None:
+            source_type = SourceType(fact.source_type)
+        
+        base = self.base_confidence_scores.get(source_type, 0.75)
+        fact.confidence = base
+        return fact
+    
+    def normalize_chapter_relevance(self, fact: Fact) -> Fact:
+        """
+        Ensure all standard chapters have relevance scores.
+        
+        Args:
+            fact: The fact to normalize
+            
+        Returns:
+            Updated fact with all chapters
+        """
+        normalized = {ch: 0.0 for ch in self.standard_chapters}
+        normalized.update(fact.chapter_relevance)
+        
+        # Clamp all values to valid range
+        for chapter in normalized:
+            normalized[chapter] = max(0.0, min(1.0, normalized[chapter]))
+        
+        fact.chapter_relevance = normalized
+        return fact
+    
+    def validate_fact(self, fact: Fact) -> list[str]:
+        """
+        Validate a fact and return any issues.
+        
+        Args:
+            fact: The fact to validate
+            
+        Returns:
+            List of validation issue strings (empty if valid)
+        """
+        issues = []
+        
+        # Check content
+        if not fact.content or len(fact.content.strip()) < 5:
+            issues.append("Fact content is too short or empty")
+        
+        if len(fact.content) > 1000:
+            issues.append("Fact content is unusually long (>1000 chars)")
+        
+        # Check confidence
+        if fact.confidence < 0.0 or fact.confidence > 1.0:
+            issues.append(f"Confidence {fact.confidence} is out of range [0, 1]")
+        
+        # Check importance
+        if fact.importance not in [e.value for e in ImportanceLevel]:
+            issues.append(f"Invalid importance level: {fact.importance}")
+        
+        # Check chapter relevance
+        for chapter, score in fact.chapter_relevance.items():
+            if score < 0.0 or score > 1.0:
+                issues.append(f"Chapter {chapter} relevance {score} is out of range")
+        
+        return issues
+    
+    def score_fact_quality(self, fact: Fact) -> float:
+        """
+        Calculate an overall quality score for a fact.
+        
+        Considers:
+        - Content specificity (length, numbers, names)
+        - Confidence level
+        - Importance rating
+        - Chapter relevance spread
+        
+        Args:
+            fact: The fact to score
+            
+        Returns:
+            Quality score from 0.0 to 1.0
+        """
+        scores = []
+        
+        # Content specificity (presence of numbers, specific terms)
+        content = fact.content
+        specificity = 0.5
+        
+        # Bonus for numbers
+        if any(char.isdigit() for char in content):
+            specificity += 0.2
+        
+        # Bonus for specific length (not too short, not too long)
+        if 20 < len(content) < 200:
+            specificity += 0.2
+        
+        # Bonus for currency/percentage symbols
+        if any(sym in content for sym in ["$", "€", "£", "%"]):
+            specificity += 0.1
+        
+        scores.append(min(1.0, specificity))
+        
+        # Confidence contributes to quality
+        scores.append(fact.confidence)
+        
+        # Importance rating
+        importance_scores = {
+            ImportanceLevel.HIGH.value: 1.0,
+            ImportanceLevel.MEDIUM.value: 0.6,
+            ImportanceLevel.LOW.value: 0.3,
+        }
+        scores.append(importance_scores.get(fact.importance, 0.5))
+        
+        # Chapter relevance (prefer focused facts over generic ones)
+        relevance_values = list(fact.chapter_relevance.values())
+        if relevance_values:
+            max_relevance = max(relevance_values)
+            avg_relevance = sum(relevance_values) / len(relevance_values)
+            # High max with low average = focused (good)
+            focus_score = max_relevance * (1 - avg_relevance * 0.5)
+            scores.append(focus_score)
+        
+        return round(sum(scores) / len(scores), 3)
+
+
+def apply_confidence_adjustment(
+    fact: Fact,
+    adjustment: float = 0.0,
+) -> Fact:
+    """
+    Standalone function to apply confidence adjustment.
+    
+    Convenience wrapper around FactScorer.apply_confidence_adjustment.
+    """
+    scorer = FactScorer()
+    return scorer.apply_confidence_adjustment(fact, adjustment)
+
+
+def get_facts_by_quality(
+    facts: list[Fact],
+    min_quality: float = 0.0,
+) -> list[Fact]:
+    """
+    Filter and sort facts by quality score.
+    
+    Args:
+        facts: List of facts to filter
+        min_quality: Minimum quality threshold
+        
+    Returns:
+        Filtered list sorted by quality (descending)
+    """
+    scorer = FactScorer()
+    
+    scored = [
+        (fact, scorer.score_fact_quality(fact))
+        for fact in facts
+    ]
+    
+    filtered = [
+        (fact, score) for fact, score in scored
+        if score >= min_quality
+    ]
+    
+    filtered.sort(key=lambda x: x[1], reverse=True)
+    
+    return [fact for fact, _ in filtered]
+
+
+def categorize_by_importance(
+    facts: list[Fact],
+) -> dict[str, list[Fact]]:
+    """
+    Categorize facts by importance level.
+    
+    Args:
+        facts: List of facts to categorize
+        
+    Returns:
+        Dictionary mapping importance level to facts
+    """
+    result = {
+        ImportanceLevel.HIGH.value: [],
+        ImportanceLevel.MEDIUM.value: [],
+        ImportanceLevel.LOW.value: [],
+    }
+    
+    for fact in facts:
+        importance = fact.importance
+        if importance in result:
+            result[importance].append(fact)
+        else:
+            result[ImportanceLevel.MEDIUM.value].append(fact)
+    
+    return result
+
+
+def get_chapter_summary(facts: list[Fact]) -> dict[str, dict]:
+    """
+    Get summary statistics for each chapter.
+    
+    Args:
+        facts: List of facts to analyze
+        
+    Returns:
+        Dictionary with chapter statistics
+    """
+    chapter_stats = {}
+    
+    for chapter in STANDARD_CHAPTERS:
+        relevant_facts = [
+            f for f in facts
+            if f.chapter_relevance.get(chapter, 0.0) >= 0.5
+        ]
+        
+        if relevant_facts:
+            avg_confidence = sum(f.confidence for f in relevant_facts) / len(relevant_facts)
+            importance_counts = {
+                "high": sum(1 for f in relevant_facts if f.importance == ImportanceLevel.HIGH.value),
+                "medium": sum(1 for f in relevant_facts if f.importance == ImportanceLevel.MEDIUM.value),
+                "low": sum(1 for f in relevant_facts if f.importance == ImportanceLevel.LOW.value),
+            }
+        else:
+            avg_confidence = 0.0
+            importance_counts = {"high": 0, "medium": 0, "low": 0}
+        
+        chapter_stats[chapter] = {
+            "fact_count": len(relevant_facts),
+            "avg_confidence": round(avg_confidence, 3),
+            "importance_breakdown": importance_counts,
+        }
+    
+    return chapter_stats
+</file>
+
+<file path="src/storage/__init__.py">
+"""Storage and database modules."""
+
+from .models import Fact, Document, SourceType, ImportanceLevel, STANDARD_CHAPTERS
+from .repository import FactRepository
+
+__all__ = [
+    "Fact",
+    "Document", 
+    "SourceType",
+    "ImportanceLevel",
+    "STANDARD_CHAPTERS",
+    "FactRepository",
+]
+</file>
+
+<file path="src/storage/models.py">
+"""
+Data models for Factor.
+
+Defines the Fact and Document schemas using Pydantic.
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+# Standard chapters for investment memos
+STANDARD_CHAPTERS = [
+    "Opportunity Validation",
+    "Product & Technology",
+    "Market Research",
+    "Competitive Analysis",
+    "Revenue Model",
+    "Go-to-Market",
+    "Unit Economics",
+    "Finance & Operations",
+    "Talent & Team",
+    "Legal & IP",
+]
+
+# Chapter descriptions for LLM prompts
+CHAPTER_DESCRIPTIONS = {
+    "Opportunity Validation": "Customer need, demand evidence, market timing, problem-solution fit",
+    "Product & Technology": "What's being built, technical feasibility, IP, product roadmap",
+    "Market Research": "Market size (TAM/SAM/SOM), structure, dynamics, trends, segments",
+    "Competitive Analysis": "Competitive landscape, positioning, differentiation, moats",
+    "Revenue Model": "How money is made, pricing strategy, unit economics, monetization",
+    "Go-to-Market": "Customer acquisition, sales strategy, channels, partnerships",
+    "Unit Economics": "CAC, LTV, margins, payback period, key financial metrics",
+    "Finance & Operations": "Financial projections, assumptions, capital needs, operations",
+    "Talent & Team": "Team capabilities, leadership, hiring plans, culture, advisors",
+    "Legal & IP": "Corporate structure, compliance, intellectual property, contracts",
+}
+
+
+class SourceType(str, Enum):
+    """Type of source document."""
+    COMPANY_PRESENTATION = "company_presentation"
+    MARKET_RESEARCH = "market_research"
+    FINANCIALS = "financials"
+
+
+class ImportanceLevel(str, Enum):
+    """Importance level of a fact."""
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+# Base confidence scores by source type
+BASE_CONFIDENCE_SCORES = {
+    SourceType.FINANCIALS: 0.90,
+    SourceType.MARKET_RESEARCH: 0.85,
+    SourceType.COMPANY_PRESENTATION: 0.70,
+}
+
+
+class Fact(BaseModel):
+    """
+    A single atomic fact extracted from a document.
+    
+    Represents a verifiable claim that can be used in investment memo generation.
+    """
+    
+    id: str = Field(
+        description="Unique identifier (UUID)"
+    )
+    content: str = Field(
+        description="The atomic fact text (single verifiable claim)"
+    )
+    source_documents: list[str] = Field(
+        default_factory=list,
+        description="List of source document filenames"
+    )
+    source_type: SourceType = Field(
+        description="Type of the primary source document"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence score based on source reliability (0.0-1.0)"
+    )
+    importance: ImportanceLevel = Field(
+        description="Importance level for investment decisions"
+    )
+    chapter_relevance: dict[str, float] = Field(
+        default_factory=dict,
+        description="Relevance scores for each standard chapter (0.0-1.0)"
+    )
+    extraction_timestamp: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the fact was extracted"
+    )
+    usage_count: int = Field(
+        default=0,
+        ge=0,
+        description="Number of times this fact has been used in generation"
+    )
+    used_in_chapters: list[str] = Field(
+        default_factory=list,
+        description="List of chapters where this fact was used"
+    )
+    embedding: list[float] | None = Field(
+        default=None,
+        description="Embedding vector for deduplication"
+    )
+    
+    class Config:
+        use_enum_values = True
+    
+    def get_top_chapters(self, n: int = 3) -> list[tuple[str, float]]:
+        """
+        Get the top N most relevant chapters.
+        
+        Args:
+            n: Number of chapters to return
+            
+        Returns:
+            List of (chapter_name, relevance_score) tuples
+        """
+        sorted_chapters = sorted(
+            self.chapter_relevance.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return sorted_chapters[:n]
+    
+    def is_relevant_to_chapter(
+        self, 
+        chapter: str, 
+        threshold: float = 0.5
+    ) -> bool:
+        """Check if fact is relevant to a specific chapter."""
+        return self.chapter_relevance.get(chapter, 0.0) >= threshold
+    
+    def to_display_dict(self) -> dict:
+        """Convert to a dictionary suitable for display."""
+        top_chapters = self.get_top_chapters(3)
+        top_chapters_str = ", ".join(
+            f"{ch} ({score:.0%})" for ch, score in top_chapters if score > 0.3
+        )
+        
+        return {
+            "ID": self.id[:8],
+            "Content": self.content,
+            "Source(s)": ", ".join(self.source_documents),
+            "Confidence": f"{self.confidence:.0%}",
+            "Importance": self.importance,
+            "Top Chapters": top_chapters_str or "General",
+            "Usage Count": self.usage_count,
+        }
+
+
+class Document(BaseModel):
+    """
+    A source document that has been processed.
+    
+    Stores metadata and raw content for traceability.
+    """
+    
+    id: str = Field(
+        description="Unique identifier (UUID)"
+    )
+    filename: str = Field(
+        description="Original filename"
+    )
+    file_type: Literal["pdf", "xlsx", "xls"] = Field(
+        description="File extension/type"
+    )
+    source_type: SourceType = Field(
+        description="Classification of the document"
+    )
+    upload_timestamp: datetime = Field(
+        default_factory=datetime.utcnow,
+        description="When the document was uploaded"
+    )
+    raw_content: str = Field(
+        description="Extracted text/markdown content"
+    )
+    page_count: int | None = Field(
+        default=None,
+        description="Number of pages (for PDFs)"
+    )
+    sheet_count: int | None = Field(
+        default=None,
+        description="Number of sheets (for Excel files)"
+    )
+    fact_count: int = Field(
+        default=0,
+        description="Number of facts extracted from this document"
+    )
+    
+    class Config:
+        use_enum_values = True
+
+
+class ExtractedFactRaw(BaseModel):
+    """
+    Raw fact as returned by the LLM before post-processing.
+    
+    This is an intermediate representation before UUIDs and 
+    confidence adjustments are applied.
+    """
+    
+    content: str = Field(
+        description="The fact content"
+    )
+    importance: ImportanceLevel = Field(
+        description="Suggested importance level"
+    )
+    chapter_relevance: dict[str, float] = Field(
+        description="Relevance scores for chapters"
+    )
+    confidence_adjustment: float = Field(
+        default=0.0,
+        ge=-0.15,
+        le=0.15,
+        description="LLM's suggested confidence adjustment (-0.15 to +0.15)"
+    )
+    
+    class Config:
+        use_enum_values = True
+
+
+class FactExtractionResponse(BaseModel):
+    """Response schema for fact extraction LLM calls."""
+    
+    facts: list[ExtractedFactRaw] = Field(
+        description="List of extracted facts"
+    )
+</file>
+
+<file path="src/storage/repository.py">
+"""
+SQLite repository for facts and documents.
+
+Provides CRUD operations with connection pooling and query support.
+"""
+
+import json
+import os
+import sqlite3
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Iterator
+from contextlib import contextmanager
+
+from dotenv import load_dotenv
+
+from .models import Fact, Document, SourceType, ImportanceLevel, STANDARD_CHAPTERS
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+class FactRepository:
+    """
+    SQLite repository for storing and querying facts.
+    
+    Usage:
+        repo = FactRepository()
+        repo.insert_fact(fact)
+        facts = repo.get_all_facts()
+    """
+    
+    def __init__(self, db_path: str | None = None):
+        """
+        Initialize the repository.
+        
+        Args:
+            db_path: Path to SQLite database file (defaults to env var or data/factor.db)
+        """
+        if db_path is None:
+            db_path = os.getenv("DATABASE_PATH", "data/factor.db")
+        
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        self._init_db()
+    
+    @contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        """Get a database connection with proper cleanup."""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    
+    def _init_db(self):
+        """Initialize database schema."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Documents table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS documents (
+                    id TEXT PRIMARY KEY,
+                    filename TEXT NOT NULL,
+                    file_type TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    upload_timestamp TEXT NOT NULL,
+                    raw_content TEXT NOT NULL,
+                    page_count INTEGER,
+                    sheet_count INTEGER,
+                    fact_count INTEGER DEFAULT 0
+                )
+            """)
+            
+            # Facts table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS facts (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    source_documents TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    importance TEXT NOT NULL,
+                    chapter_relevance TEXT NOT NULL,
+                    extraction_timestamp TEXT NOT NULL,
+                    usage_count INTEGER DEFAULT 0,
+                    used_in_chapters TEXT DEFAULT '[]',
+                    embedding TEXT
+                )
+            """)
+            
+            # Indexes for common queries
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_facts_importance 
+                ON facts(importance)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_facts_usage_count 
+                ON facts(usage_count)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_facts_confidence 
+                ON facts(confidence)
+            """)
+            
+            logger.info(f"Database initialized at {self.db_path}")
+    
+    # ==================== Fact Operations ====================
+    
+    def insert_fact(self, fact: Fact) -> str:
+        """
+        Insert a new fact.
+        
+        Args:
+            fact: The fact to insert
+            
+        Returns:
+            The fact's ID
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO facts (
+                    id, content, source_documents, source_type, confidence,
+                    importance, chapter_relevance, extraction_timestamp,
+                    usage_count, used_in_chapters, embedding
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                fact.id,
+                fact.content,
+                json.dumps(fact.source_documents),
+                fact.source_type,
+                fact.confidence,
+                fact.importance,
+                json.dumps(fact.chapter_relevance),
+                fact.extraction_timestamp.isoformat(),
+                fact.usage_count,
+                json.dumps(fact.used_in_chapters),
+                json.dumps(fact.embedding) if fact.embedding else None,
+            ))
+        
+        logger.debug(f"Inserted fact {fact.id[:8]}")
+        return fact.id
+    
+    def insert_facts(self, facts: list[Fact]) -> int:
+        """
+        Insert multiple facts in a batch.
+        
+        Args:
+            facts: List of facts to insert
+            
+        Returns:
+            Number of facts inserted
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany("""
+                INSERT INTO facts (
+                    id, content, source_documents, source_type, confidence,
+                    importance, chapter_relevance, extraction_timestamp,
+                    usage_count, used_in_chapters, embedding
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                (
+                    f.id,
+                    f.content,
+                    json.dumps(f.source_documents),
+                    f.source_type,
+                    f.confidence,
+                    f.importance,
+                    json.dumps(f.chapter_relevance),
+                    f.extraction_timestamp.isoformat(),
+                    f.usage_count,
+                    json.dumps(f.used_in_chapters),
+                    json.dumps(f.embedding) if f.embedding else None,
+                )
+                for f in facts
+            ])
+        
+        logger.info(f"Inserted {len(facts)} facts")
+        return len(facts)
+    
+    def _row_to_fact(self, row: sqlite3.Row) -> Fact:
+        """Convert a database row to a Fact object."""
+        return Fact(
+            id=row["id"],
+            content=row["content"],
+            source_documents=json.loads(row["source_documents"]),
+            source_type=row["source_type"],
+            confidence=row["confidence"],
+            importance=row["importance"],
+            chapter_relevance=json.loads(row["chapter_relevance"]),
+            extraction_timestamp=datetime.fromisoformat(row["extraction_timestamp"]),
+            usage_count=row["usage_count"],
+            used_in_chapters=json.loads(row["used_in_chapters"]),
+            embedding=json.loads(row["embedding"]) if row["embedding"] else None,
+        )
+    
+    def get_fact(self, fact_id: str) -> Fact | None:
+        """Get a fact by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM facts WHERE id = ?", (fact_id,))
+            row = cursor.fetchone()
+            
+            if row is None:
+                return None
+            
+            return self._row_to_fact(row)
+    
+    def get_all_facts(self) -> list[Fact]:
+        """Get all facts."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM facts ORDER BY extraction_timestamp DESC")
+            return [self._row_to_fact(row) for row in cursor.fetchall()]
+    
+    def get_facts_by_importance(self, importance: ImportanceLevel | str) -> list[Fact]:
+        """Get facts filtered by importance level."""
+        if isinstance(importance, ImportanceLevel):
+            importance = importance.value
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM facts WHERE importance = ? ORDER BY confidence DESC",
+                (importance,)
+            )
+            return [self._row_to_fact(row) for row in cursor.fetchall()]
+    
+    def get_facts_by_chapter(
+        self, 
+        chapter: str, 
+        min_relevance: float = 0.5
+    ) -> list[Fact]:
+        """
+        Get facts relevant to a specific chapter.
+        
+        Args:
+            chapter: Chapter name
+            min_relevance: Minimum relevance score threshold
+            
+        Returns:
+            List of relevant facts, sorted by relevance
+        """
+        all_facts = self.get_all_facts()
+        
+        relevant = [
+            f for f in all_facts
+            if f.chapter_relevance.get(chapter, 0.0) >= min_relevance
+        ]
+        
+        # Sort by relevance to this chapter
+        relevant.sort(
+            key=lambda f: f.chapter_relevance.get(chapter, 0.0),
+            reverse=True
+        )
+        
+        return relevant
+    
+    def get_facts_by_source(self, filename: str) -> list[Fact]:
+        """Get facts from a specific source document."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM facts WHERE source_documents LIKE ?",
+                (f'%"{filename}"%',)
+            )
+            return [self._row_to_fact(row) for row in cursor.fetchall()]
+    
+    def get_underused_facts(self, max_usage: int = 0) -> list[Fact]:
+        """
+        Get facts that have been used infrequently.
+        
+        Args:
+            max_usage: Maximum usage count to include
+            
+        Returns:
+            List of underused facts, sorted by usage count ascending
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM facts WHERE usage_count <= ? ORDER BY usage_count ASC",
+                (max_usage,)
+            )
+            return [self._row_to_fact(row) for row in cursor.fetchall()]
+    
+    def search_facts(self, query: str) -> list[Fact]:
+        """
+        Search facts by content.
+        
+        Args:
+            query: Search string (case-insensitive substring match)
+            
+        Returns:
+            List of matching facts
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM facts WHERE content LIKE ? ORDER BY confidence DESC",
+                (f"%{query}%",)
+            )
+            return [self._row_to_fact(row) for row in cursor.fetchall()]
+    
+    def update_usage(
+        self, 
+        fact_id: str, 
+        chapter: str | None = None
+    ) -> bool:
+        """
+        Increment usage count and optionally record the chapter.
+        
+        Args:
+            fact_id: The fact's ID
+            chapter: Optional chapter where the fact was used
+            
+        Returns:
+            True if updated, False if fact not found
+        """
+        fact = self.get_fact(fact_id)
+        if fact is None:
+            return False
+        
+        new_count = fact.usage_count + 1
+        used_chapters = fact.used_in_chapters.copy()
+        
+        if chapter and chapter not in used_chapters:
+            used_chapters.append(chapter)
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE facts 
+                SET usage_count = ?, used_in_chapters = ?
+                WHERE id = ?
+            """, (new_count, json.dumps(used_chapters), fact_id))
+        
+        return True
+    
+    def delete_fact(self, fact_id: str) -> bool:
+        """
+        Delete a fact by ID.
+        
+        Returns:
+            True if deleted, False if not found
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+            deleted = cursor.rowcount > 0
+        
+        if deleted:
+            logger.debug(f"Deleted fact {fact_id[:8]}")
+        
+        return deleted
+    
+    def clear_all_facts(self):
+        """Delete all facts from the database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM facts")
+            count = cursor.rowcount
+        
+        logger.info(f"Cleared {count} facts from database")
+    
+    # ==================== Document Operations ====================
+    
+    def insert_document(self, document: Document) -> str:
+        """Insert a new document."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO documents (
+                    id, filename, file_type, source_type, upload_timestamp,
+                    raw_content, page_count, sheet_count, fact_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                document.id,
+                document.filename,
+                document.file_type,
+                document.source_type,
+                document.upload_timestamp.isoformat(),
+                document.raw_content,
+                document.page_count,
+                document.sheet_count,
+                document.fact_count,
+            ))
+        
+        logger.debug(f"Inserted document {document.filename}")
+        return document.id
+    
+    def _row_to_document(self, row: sqlite3.Row) -> Document:
+        """Convert a database row to a Document object."""
+        return Document(
+            id=row["id"],
+            filename=row["filename"],
+            file_type=row["file_type"],
+            source_type=row["source_type"],
+            upload_timestamp=datetime.fromisoformat(row["upload_timestamp"]),
+            raw_content=row["raw_content"],
+            page_count=row["page_count"],
+            sheet_count=row["sheet_count"],
+            fact_count=row["fact_count"],
+        )
+    
+    def get_document(self, doc_id: str) -> Document | None:
+        """Get a document by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
+            row = cursor.fetchone()
+            
+            if row is None:
+                return None
+            
+            return self._row_to_document(row)
+    
+    def get_document_by_filename(self, filename: str) -> Document | None:
+        """Get a document by filename."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM documents WHERE filename = ?", (filename,))
+            row = cursor.fetchone()
+            
+            if row is None:
+                return None
+            
+            return self._row_to_document(row)
+    
+    def get_all_documents(self) -> list[Document]:
+        """Get all documents."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM documents ORDER BY upload_timestamp DESC")
+            return [self._row_to_document(row) for row in cursor.fetchall()]
+    
+    def update_document_fact_count(self, doc_id: str, fact_count: int) -> bool:
+        """Update the fact count for a document."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE documents SET fact_count = ? WHERE id = ?",
+                (fact_count, doc_id)
+            )
+            return cursor.rowcount > 0
+    
+    def delete_document(self, doc_id: str) -> bool:
+        """Delete a document by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+            return cursor.rowcount > 0
+    
+    def clear_all_documents(self):
+        """Delete all documents from the database."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM documents")
+            count = cursor.rowcount
+        
+        logger.info(f"Cleared {count} documents from database")
+    
+    # ==================== Statistics ====================
+    
+    def get_statistics(self) -> dict:
+        """
+        Get summary statistics about the fact bank.
+        
+        Returns:
+            Dictionary with various statistics
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Total facts
+            cursor.execute("SELECT COUNT(*) FROM facts")
+            total_facts = cursor.fetchone()[0]
+            
+            # Total documents
+            cursor.execute("SELECT COUNT(*) FROM documents")
+            total_documents = cursor.fetchone()[0]
+            
+            # Facts by importance
+            cursor.execute("""
+                SELECT importance, COUNT(*) 
+                FROM facts 
+                GROUP BY importance
+            """)
+            importance_breakdown = dict(cursor.fetchall())
+            
+            # Average confidence
+            cursor.execute("SELECT AVG(confidence) FROM facts")
+            avg_confidence = cursor.fetchone()[0] or 0.0
+            
+            # Source documents
+            cursor.execute("SELECT DISTINCT filename FROM documents")
+            source_files = [row[0] for row in cursor.fetchall()]
+            
+        return {
+            "total_facts": total_facts,
+            "total_documents": total_documents,
+            "importance_breakdown": {
+                "high": importance_breakdown.get("high", 0),
+                "medium": importance_breakdown.get("medium", 0),
+                "low": importance_breakdown.get("low", 0),
+            },
+            "average_confidence": round(avg_confidence, 3),
+            "source_documents": source_files,
+        }
+</file>
+
+<file path="src/utils/__init__.py">
+"""Utility modules."""
+
+from .llm_client import LLMClient, LLMProvider
+from .embeddings import EmbeddingClient, deduplicate_facts
+
+__all__ = [
+    "LLMClient",
+    "LLMProvider",
+    "EmbeddingClient",
+    "deduplicate_facts",
+]
+</file>
+
+<file path="src/utils/embeddings.py">
+"""
+Embedding client and deduplication utilities.
+
+Uses OpenRouter for embeddings and provides deduplication logic for facts.
+"""
+
+import os
+import asyncio
+import logging
+from typing import TYPE_CHECKING
+
+import httpx
+import numpy as np
+from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from src.storage.models import Fact
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+class EmbeddingClientError(Exception):
+    """Base exception for embedding client errors."""
+    pass
+
+
+class EmbeddingClient:
+    """
+    Client for generating embeddings via OpenRouter.
+    
+    Usage:
+        client = EmbeddingClient()
+        embeddings = await client.get_embeddings(["text1", "text2"])
+    """
+    
+    OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+    DEFAULT_MODEL = "openai/text-embedding-3-small"
+    
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        batch_size: int = 100,
+    ):
+        """
+        Initialize the embedding client.
+        
+        Args:
+            api_key: OpenRouter API key (defaults to environment variable)
+            model: Embedding model to use
+            timeout: Request timeout in seconds
+            max_retries: Maximum number of retry attempts
+            batch_size: Maximum texts per API call
+        """
+        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        if not self.api_key:
+            raise EmbeddingClientError(
+                "No API key provided. Set OPENROUTER_API_KEY environment variable."
+            )
+        
+        self.model = model or os.getenv("DEFAULT_EMBEDDING_MODEL", self.DEFAULT_MODEL)
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.batch_size = batch_size
+        self._client: httpx.AsyncClient | None = None
+    
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://factor.innovera.ai",
+                    "X-Title": "Factor Fact Bank",
+                },
+            )
+        return self._client
+    
+    async def get_embedding(self, text: str) -> list[float]:
+        """
+        Get embedding for a single text.
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            Embedding vector as list of floats
+        """
+        embeddings = await self.get_embeddings([text])
+        return embeddings[0]
+    
+    async def get_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """
+        Get embeddings for multiple texts.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        if not texts:
+            return []
+        
+        # Process in batches
+        all_embeddings = []
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            batch_embeddings = await self._get_embeddings_batch(batch)
+            all_embeddings.extend(batch_embeddings)
+        
+        return all_embeddings
+    
+    async def _get_embeddings_batch(self, texts: list[str]) -> list[list[float]]:
+        """Get embeddings for a batch of texts."""
+        client = await self._get_client()
+        url = f"{self.OPENROUTER_BASE_URL}/embeddings"
+        
+        payload = {
+            "model": self.model,
+            "input": texts,
+        }
+        
+        last_error: Exception | None = None
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = await client.post(url, json=payload)
+                
+                if response.status_code == 429:
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Rate limited, waiting {wait_time}s before retry")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                # Sort by index to ensure correct order
+                embeddings_data = sorted(data["data"], key=lambda x: x["index"])
+                return [item["embedding"] for item in embeddings_data]
+                
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                logger.error(f"HTTP error on attempt {attempt + 1}: {e}")
+                if e.response.status_code >= 500:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                raise EmbeddingClientError(f"API error: {e}") from e
+                
+            except httpx.RequestError as e:
+                last_error = e
+                logger.error(f"Request error on attempt {attempt + 1}: {e}")
+                await asyncio.sleep(2 ** attempt)
+                continue
+        
+        raise EmbeddingClientError(
+            f"Failed after {self.max_retries} attempts: {last_error}"
+        )
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+
+def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    """
+    Compute cosine similarity between two vectors.
+    
+    Args:
+        vec1: First vector
+        vec2: Second vector
+        
+    Returns:
+        Cosine similarity score (0.0 to 1.0)
+    """
+    a = np.array(vec1)
+    b = np.array(vec2)
+    
+    dot_product = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    
+    return float(dot_product / (norm_a * norm_b))
+
+
+def cosine_similarity_matrix(embeddings: list[list[float]]) -> np.ndarray:
+    """
+    Compute pairwise cosine similarity matrix.
+    
+    Args:
+        embeddings: List of embedding vectors
+        
+    Returns:
+        NxN similarity matrix
+    """
+    matrix = np.array(embeddings)
+    
+    # Normalize rows
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1  # Avoid division by zero
+    normalized = matrix / norms
+    
+    # Compute similarity matrix
+    return np.dot(normalized, normalized.T)
+
+
+def find_duplicate_pairs(
+    embeddings: list[list[float]],
+    threshold: float = 0.85,
+) -> list[tuple[int, int, float]]:
+    """
+    Find pairs of indices with similarity above threshold.
+    
+    Args:
+        embeddings: List of embedding vectors
+        threshold: Similarity threshold for duplicates
+        
+    Returns:
+        List of (idx1, idx2, similarity) tuples
+    """
+    if len(embeddings) < 2:
+        return []
+    
+    sim_matrix = cosine_similarity_matrix(embeddings)
+    n = len(embeddings)
+    
+    duplicates = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            similarity = sim_matrix[i, j]
+            if similarity >= threshold:
+                duplicates.append((i, j, float(similarity)))
+    
+    return duplicates
+
+
+async def deduplicate_facts(
+    facts: list["Fact"],
+    embedding_client: EmbeddingClient | None = None,
+    threshold: float = 0.85,
+) -> list["Fact"]:
+    """
+    Deduplicate facts based on embedding similarity.
+    
+    Merges duplicate facts by:
+    - Keeping the more detailed content
+    - Combining source documents
+    - Averaging confidence scores
+    - Keeping the highest importance rating
+    
+    Args:
+        facts: List of facts to deduplicate
+        embedding_client: Optional pre-configured client
+        threshold: Similarity threshold for duplicates
+        
+    Returns:
+        Deduplicated list of facts
+    """
+    from src.storage.models import Fact, ImportanceLevel
+    
+    if len(facts) < 2:
+        return facts
+    
+    # Get or create embedding client
+    close_client = False
+    if embedding_client is None:
+        embedding_client = EmbeddingClient()
+        close_client = True
+    
+    try:
+        # Get embeddings for facts that don't have them
+        facts_needing_embeddings = [
+            (i, f) for i, f in enumerate(facts) if f.embedding is None
+        ]
+        
+        if facts_needing_embeddings:
+            indices, facts_to_embed = zip(*facts_needing_embeddings)
+            texts = [f.content for f in facts_to_embed]
+            new_embeddings = await embedding_client.get_embeddings(texts)
+            
+            for idx, embedding in zip(indices, new_embeddings):
+                facts[idx].embedding = embedding
+        
+        # Get all embeddings
+        embeddings = [f.embedding for f in facts]
+        
+        # Find duplicates
+        duplicate_pairs = find_duplicate_pairs(embeddings, threshold)
+        
+        if not duplicate_pairs:
+            return facts
+        
+        # Build union-find structure for merging groups
+        parent = list(range(len(facts)))
+        
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+        
+        for i, j, _ in duplicate_pairs:
+            union(i, j)
+        
+        # Group facts by their root
+        groups: dict[int, list[int]] = {}
+        for i in range(len(facts)):
+            root = find(i)
+            if root not in groups:
+                groups[root] = []
+            groups[root].append(i)
+        
+        # Merge each group
+        result = []
+        importance_order = {
+            ImportanceLevel.HIGH: 3,
+            ImportanceLevel.MEDIUM: 2,
+            ImportanceLevel.LOW: 1,
+        }
+        
+        for indices in groups.values():
+            group_facts = [facts[i] for i in indices]
+            
+            if len(group_facts) == 1:
+                result.append(group_facts[0])
+                continue
+            
+            # Keep the most detailed content (longest)
+            best_fact = max(group_facts, key=lambda f: len(f.content))
+            
+            # Combine source documents
+            all_sources = []
+            for f in group_facts:
+                all_sources.extend(f.source_documents)
+            unique_sources = list(dict.fromkeys(all_sources))  # Preserve order
+            
+            # Average confidence or take higher if sources differ in reliability
+            avg_confidence = sum(f.confidence for f in group_facts) / len(group_facts)
+            max_confidence = max(f.confidence for f in group_facts)
+            # If there's significant variance, take the higher one
+            confidence_variance = max(f.confidence for f in group_facts) - min(f.confidence for f in group_facts)
+            final_confidence = max_confidence if confidence_variance > 0.1 else avg_confidence
+            
+            # Keep highest importance
+            best_importance = max(
+                group_facts,
+                key=lambda f: importance_order.get(f.importance, 0)
+            ).importance
+            
+            # Merge chapter relevance (take max for each chapter)
+            merged_relevance = {}
+            for f in group_facts:
+                for chapter, score in f.chapter_relevance.items():
+                    if chapter not in merged_relevance:
+                        merged_relevance[chapter] = score
+                    else:
+                        merged_relevance[chapter] = max(merged_relevance[chapter], score)
+            
+            # Create merged fact
+            merged = Fact(
+                id=best_fact.id,
+                content=best_fact.content,
+                source_documents=unique_sources,
+                source_type=best_fact.source_type,
+                confidence=round(final_confidence, 3),
+                importance=best_importance,
+                chapter_relevance=merged_relevance,
+                extraction_timestamp=best_fact.extraction_timestamp,
+                usage_count=0,
+                used_in_chapters=[],
+                embedding=best_fact.embedding,
+            )
+            result.append(merged)
+        
+        logger.info(
+            f"Deduplication: {len(facts)} facts -> {len(result)} unique "
+            f"({len(facts) - len(result)} duplicates merged)"
+        )
+        
+        return result
+        
+    finally:
+        if close_client:
+            await embedding_client.close()
+
+
+# Synchronous wrapper
+class SyncEmbeddingClient:
+    """Synchronous wrapper for EmbeddingClient."""
+    
+    def __init__(self, **kwargs):
+        self._async_client = EmbeddingClient(**kwargs)
+        self._loop: asyncio.AbstractEventLoop | None = None
+    
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            if self._loop is None or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            return self._loop
+    
+    def get_embedding(self, text: str) -> list[float]:
+        loop = self._get_loop()
+        return loop.run_until_complete(self._async_client.get_embedding(text))
+    
+    def get_embeddings(self, texts: list[str]) -> list[list[float]]:
+        loop = self._get_loop()
+        return loop.run_until_complete(self._async_client.get_embeddings(texts))
+    
+    def close(self):
+        if self._loop and not self._loop.is_closed():
+            self._loop.run_until_complete(self._async_client.close())
+            self._loop.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+def deduplicate_facts_sync(
+    facts: list["Fact"],
+    threshold: float = 0.85,
+) -> list["Fact"]:
+    """Synchronous wrapper for deduplicate_facts."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(
+            deduplicate_facts(facts, threshold=threshold)
+        )
+    finally:
+        loop.close()
+</file>
+
+<file path="src/utils/llm_client.py">
+"""
+LLM Client abstraction for OpenRouter and Groq.
+
+Provides a unified interface for making LLM calls across different providers.
+"""
+
+import os
+import json
+import asyncio
+import logging
+from enum import Enum
+from typing import Any
+from dataclasses import dataclass
+
+import httpx
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+class LLMProvider(str, Enum):
+    """Supported LLM providers."""
+    OPENROUTER = "openrouter"
+    GROQ = "groq"
+
+
+@dataclass
+class LLMResponse:
+    """Response from an LLM call."""
+    content: str
+    model: str
+    provider: LLMProvider
+    usage: dict[str, int] | None = None
+    raw_response: dict | None = None
+
+
+class LLMClientError(Exception):
+    """Base exception for LLM client errors."""
+    pass
+
+
+class LLMClient:
+    """
+    Unified LLM client supporting OpenRouter and Groq.
+    
+    Usage:
+        client = LLMClient(provider=LLMProvider.OPENROUTER)
+        response = await client.chat_completion(
+            messages=[{"role": "user", "content": "Hello"}],
+            model="anthropic/claude-3.5-sonnet"
+        )
+    """
+    
+    OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+    GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+    
+    # Default models for each provider
+    DEFAULT_MODELS = {
+        LLMProvider.OPENROUTER: "anthropic/claude-3.5-sonnet",
+        LLMProvider.GROQ: "openai/gpt-oss-120b",
+    }
+    
+    def __init__(
+        self,
+        provider: LLMProvider | str = LLMProvider.OPENROUTER,
+        api_key: str | None = None,
+        timeout: float = 120.0,
+        max_retries: int = 3,
+    ):
+        """
+        Initialize the LLM client.
+        
+        Args:
+            provider: The LLM provider to use (openrouter or groq)
+            api_key: API key (defaults to environment variable)
+            timeout: Request timeout in seconds
+            max_retries: Maximum number of retry attempts
+        """
+        if isinstance(provider, str):
+            provider = LLMProvider(provider.lower())
+        
+        self.provider = provider
+        self.timeout = timeout
+        self.max_retries = max_retries
+        
+        # Set up API key and base URL based on provider
+        if provider == LLMProvider.OPENROUTER:
+            self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+            self.base_url = self.OPENROUTER_BASE_URL
+        else:
+            self.api_key = api_key or os.getenv("GROQ_API_KEY")
+            self.base_url = self.GROQ_BASE_URL
+        
+        if not self.api_key:
+            raise LLMClientError(
+                f"No API key provided for {provider.value}. "
+                f"Set {provider.value.upper()}_API_KEY environment variable."
+            )
+        
+        self._client: httpx.AsyncClient | None = None
+    
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create the HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self.timeout),
+                headers=self._get_headers(),
+            )
+        return self._client
+    
+    def _get_headers(self) -> dict[str, str]:
+        """Get headers for API requests."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        if self.provider == LLMProvider.OPENROUTER:
+            headers["HTTP-Referer"] = "https://factor.innovera.ai"
+            headers["X-Title"] = "Factor Fact Bank"
+        
+        return headers
+    
+    async def chat_completion(
+        self,
+        messages: list[dict[str, str]],
+        model: str | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        response_format: dict | None = None,
+    ) -> LLMResponse:
+        """
+        Make a chat completion request.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            model: Model identifier (uses default if not specified)
+            temperature: Sampling temperature (0.0-2.0)
+            max_tokens: Maximum tokens in response
+            response_format: Optional response format (e.g., {"type": "json_object"})
+        
+        Returns:
+            LLMResponse with the generated content
+        """
+        model = model or self.DEFAULT_MODELS[self.provider]
+        
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        
+        if response_format:
+            payload["response_format"] = response_format
+        
+        return await self._make_request("/chat/completions", payload)
+    
+    async def _make_request(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+    ) -> LLMResponse:
+        """Make an API request with retry logic."""
+        client = await self._get_client()
+        url = f"{self.base_url}{endpoint}"
+        
+        last_error: Exception | None = None
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = await client.post(url, json=payload)
+                
+                if response.status_code == 429:
+                    # Rate limited - wait and retry
+                    wait_time = 2 ** attempt
+                    logger.warning(f"Rate limited, waiting {wait_time}s before retry")
+                    await asyncio.sleep(wait_time)
+                    continue
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                return LLMResponse(
+                    content=data["choices"][0]["message"]["content"],
+                    model=data.get("model", payload.get("model", "unknown")),
+                    provider=self.provider,
+                    usage=data.get("usage"),
+                    raw_response=data,
+                )
+                
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                # Try to extract detailed error message from response
+                error_detail = ""
+                try:
+                    error_body = e.response.json()
+                    if "error" in error_body:
+                        error_info = error_body["error"]
+                        if isinstance(error_info, dict):
+                            error_detail = error_info.get("message", str(error_info))
+                        else:
+                            error_detail = str(error_info)
+                except Exception:
+                    error_detail = e.response.text[:500] if e.response.text else ""
+                
+                logger.error(f"HTTP error on attempt {attempt + 1}: {e}. Detail: {error_detail}")
+                
+                if e.response.status_code >= 500:
+                    # Server error - retry with backoff
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                
+                # For 4xx errors, include the detail in the error message
+                error_msg = f"API error: {e}"
+                if error_detail:
+                    error_msg += f" - {error_detail}"
+                raise LLMClientError(error_msg) from e
+                
+            except httpx.RequestError as e:
+                last_error = e
+                logger.error(f"Request error on attempt {attempt + 1}: {e}")
+                await asyncio.sleep(2 ** attempt)
+                continue
+        
+        raise LLMClientError(
+            f"Failed after {self.max_retries} attempts: {last_error}"
+        )
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
+    
+    async def __aenter__(self):
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+
+# Synchronous wrapper for convenience
+class SyncLLMClient:
+    """
+    Synchronous wrapper for LLMClient.
+    
+    Usage:
+        client = SyncLLMClient(provider="openrouter")
+        response = client.chat_completion(
+            messages=[{"role": "user", "content": "Hello"}]
+        )
+    """
+    
+    def __init__(self, **kwargs):
+        self._async_client = LLMClient(**kwargs)
+        self._loop: asyncio.AbstractEventLoop | None = None
+    
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        """Get or create an event loop."""
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            if self._loop is None or self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            return self._loop
+    
+    def chat_completion(self, **kwargs) -> LLMResponse:
+        """Synchronous chat completion."""
+        loop = self._get_loop()
+        return loop.run_until_complete(
+            self._async_client.chat_completion(**kwargs)
+        )
+    
+    def close(self):
+        """Close the client."""
+        if self._loop and not self._loop.is_closed():
+            self._loop.run_until_complete(self._async_client.close())
+            self._loop.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
+def get_default_client(
+    provider: str | None = None,
+    **kwargs
+) -> LLMClient:
+    """
+    Get a default LLM client based on environment configuration.
+    
+    Args:
+        provider: Override the default provider
+        **kwargs: Additional arguments for LLMClient
+    
+    Returns:
+        Configured LLMClient instance
+    """
+    if provider is None:
+        provider = os.getenv("DEFAULT_LLM_PROVIDER", "openrouter")
+    
+    return LLMClient(provider=LLMProvider(provider.lower()), **kwargs)
+</file>
+
+<file path="streamlit_app.py">
+"""
+Factor - Fact Bank Demo UI
+
+Streamlit application for document ingestion and fact bank visualization.
+"""
+
+import asyncio
+import logging
+import os
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+import streamlit as st
+from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+# Import Factor modules
+from src.extraction.pdf_parser import extract_pdf
+from src.extraction.excel_parser import extract_excel
+from src.extraction.normalizer import ExtractedDocument
+from src.extraction.fact_extractor import FactExtractor
+from src.storage.models import Fact, Document, SourceType, ImportanceLevel, STANDARD_CHAPTERS
+from src.storage.repository import FactRepository
+from src.utils.embeddings import deduplicate_facts, EmbeddingClient
+from src.scoring.scorer import FactScorer, get_chapter_summary
+
+# Page config
+st.set_page_config(
+    page_title="Factor - Fact Bank",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# Custom CSS for styling
+st.markdown("""
+<style>
+    /* Main container */
+    .main .block-container {
+        padding-top: 2rem;
+        max-width: 1400px;
+    }
+    
+    /* Header styling */
+    .factor-header {
+        background: linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%);
+        padding: 1.5rem 2rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+        color: white;
+    }
+    
+    .factor-header h1 {
+        margin: 0;
+        font-size: 2.2rem;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+    }
+    
+    .factor-header p {
+        margin: 0.5rem 0 0 0;
+        opacity: 0.9;
+        font-size: 1.1rem;
+    }
+    
+    /* Stats cards */
+    .stat-card {
+        background: linear-gradient(145deg, #f8fafc 0%, #f1f5f9 100%);
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 1.2rem;
+        text-align: center;
+        transition: transform 0.2s ease;
+    }
+    
+    .stat-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+    }
+    
+    .stat-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: #1e3a5f;
+        line-height: 1.2;
+    }
+    
+    .stat-label {
+        font-size: 0.85rem;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 0.3rem;
+    }
+    
+    /* Importance badges */
+    .badge-high {
+        background-color: #dc2626;
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    .badge-medium {
+        background-color: #f59e0b;
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    .badge-low {
+        background-color: #6b7280;
+        color: white;
+        padding: 0.25rem 0.75rem;
+        border-radius: 9999px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    
+    /* Confidence indicator */
+    .confidence-bar {
+        height: 8px;
+        border-radius: 4px;
+        background: #e2e8f0;
+        overflow: hidden;
+    }
+    
+    .confidence-fill {
+        height: 100%;
+        border-radius: 4px;
+        transition: width 0.3s ease;
+    }
+    
+    /* Processing status */
+    .processing-status {
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+    
+    /* Sidebar improvements */
+    .css-1d391kg {
+        padding-top: 1rem;
+    }
+    
+    /* Table styling */
+    .dataframe {
+        font-size: 0.9rem;
+    }
+    
+    /* Filter section */
+    .filter-section {
+        background: #f8fafc;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# Initialize session state
+def init_session_state():
+    """Initialize session state variables."""
+    if "repository" not in st.session_state:
+        st.session_state.repository = FactRepository()
+    if "processed_files" not in st.session_state:
+        st.session_state.processed_files = []
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
+    if "last_extraction_count" not in st.session_state:
+        st.session_state.last_extraction_count = 0
+
+
+init_session_state()
+
+
+def get_confidence_color(confidence: float) -> str:
+    """Get color for confidence level."""
+    if confidence >= 0.85:
+        return "#22c55e"  # Green
+    elif confidence >= 0.70:
+        return "#eab308"  # Yellow
+    else:
+        return "#ef4444"  # Red
+
+
+def format_importance_badge(importance: str) -> str:
+    """Format importance as HTML badge."""
+    colors = {
+        "high": "#dc2626",
+        "medium": "#f59e0b",
+        "low": "#6b7280",
+    }
+    color = colors.get(importance, "#6b7280")
+    return f'<span style="background-color:{color};color:white;padding:0.2rem 0.6rem;border-radius:9999px;font-size:0.75rem;font-weight:600;">{importance.upper()}</span>'
+
+
+async def process_documents(
+    uploaded_files: list,
+    source_type: SourceType,
+    run_dedup: bool = True,
+) -> tuple[int, int]:
+    """
+    Process uploaded documents and extract facts.
+    
+    Returns:
+        Tuple of (facts_before_dedup, facts_after_dedup)
+    """
+    repo = st.session_state.repository
+    all_facts = []
+    
+    # Create extractor
+    extractor = FactExtractor()
+    
+    try:
+        for uploaded_file in uploaded_files:
+            file_name = uploaded_file.name
+            file_ext = Path(file_name).suffix.lower()
+            
+            st.write(f"Processing: **{file_name}**")
+            
+            # Extract document content
+            if file_ext == ".pdf":
+                doc = extract_pdf(uploaded_file, filename=file_name)
+            elif file_ext in (".xlsx", ".xls"):
+                doc = extract_excel(uploaded_file, filename=file_name)
+            else:
+                st.warning(f"Unsupported file type: {file_ext}")
+                continue
+            
+            # Store document metadata
+            import uuid
+            document = Document(
+                id=str(uuid.uuid4()),
+                filename=file_name,
+                file_type=file_ext.lstrip("."),
+                source_type=source_type,
+                raw_content=doc.get_full_text()[:50000],  # Limit stored content
+                page_count=doc.total_pages if file_ext == ".pdf" else None,
+                sheet_count=doc.total_pages if file_ext in (".xlsx", ".xls") else None,
+            )
+            repo.insert_document(document)
+            
+            # Extract facts
+            st.write("Extracting facts...")
+            facts = await extractor.extract_facts(doc, source_type)
+            
+            st.write(f"Found **{len(facts)}** facts")
+            all_facts.extend(facts)
+            
+            # Track processed file
+            st.session_state.processed_files.append(file_name)
+        
+        facts_before = len(all_facts)
+        
+        # Deduplicate if enabled and multiple documents
+        if run_dedup and len(all_facts) > 1:
+            st.write("Running deduplication...")
+            all_facts = await deduplicate_facts(all_facts)
+        
+        facts_after = len(all_facts)
+        
+        # Store facts in database
+        if all_facts:
+            repo.insert_facts(all_facts)
+            
+            # Update document fact counts
+            for doc in repo.get_all_documents():
+                fact_count = len(repo.get_facts_by_source(doc.filename))
+                repo.update_document_fact_count(doc.id, fact_count)
+        
+        return facts_before, facts_after
+        
+    finally:
+        await extractor.close()
+
+
+def render_header():
+    """Render the page header."""
+    st.markdown("""
+    <div class="factor-header">
+        <h1>📊 Factor — Fact Bank</h1>
+        <p>Extract, score, and manage investment facts from your documents</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_sidebar():
+    """Render the sidebar with upload and controls."""
+    with st.sidebar:
+        st.header("📁 Document Upload")
+        
+        # File uploader
+        uploaded_files = st.file_uploader(
+            "Upload PDF or Excel files",
+            type=["pdf", "xlsx", "xls"],
+            accept_multiple_files=True,
+            help="Upload company presentations, market research, or financial documents",
+        )
+        
+        # Source type selector
+        source_type = st.selectbox(
+            "Document Type",
+            options=[
+                ("Company Presentation", SourceType.COMPANY_PRESENTATION),
+                ("Market Research", SourceType.MARKET_RESEARCH),
+                ("Financial Data", SourceType.FINANCIALS),
+            ],
+            format_func=lambda x: x[0],
+            help="Select the type of documents being uploaded",
+        )
+        
+        # Deduplication toggle
+        run_dedup = st.checkbox(
+            "Enable deduplication",
+            value=True,
+            help="Detect and merge duplicate facts across documents",
+        )
+        
+        # Process button
+        if uploaded_files:
+            if st.button("🚀 Process Documents", type="primary", use_container_width=True):
+                st.session_state.processing = True
+                
+                with st.spinner("Processing documents..."):
+                    # Run async processing
+                    loop = asyncio.new_event_loop()
+                    try:
+                        before, after = loop.run_until_complete(
+                            process_documents(uploaded_files, source_type[1], run_dedup)
+                        )
+                        st.session_state.last_extraction_count = after
+                        
+                        if run_dedup and before != after:
+                            st.success(f"✅ Extracted {before} facts, {before - after} duplicates merged → {after} unique facts")
+                        else:
+                            st.success(f"✅ Extracted {after} facts successfully!")
+                    except Exception as e:
+                        st.error(f"❌ Error processing documents: {e}")
+                        logger.exception("Document processing error")
+                    finally:
+                        loop.close()
+                        st.session_state.processing = False
+        
+        st.divider()
+        
+        # Database actions
+        st.header("🗄️ Database")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Refresh", use_container_width=True):
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear All", use_container_width=True):
+                st.session_state.repository.clear_all_facts()
+                st.session_state.repository.clear_all_documents()
+                st.session_state.processed_files = []
+                st.success("Database cleared!")
+                st.rerun()
+        
+        # API Status
+        st.divider()
+        st.header("🔌 API Status")
+        
+        openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        groq_key = os.getenv("GROQ_API_KEY")
+        
+        if openrouter_key:
+            st.success("OpenRouter: Connected")
+        else:
+            st.warning("OpenRouter: No API key")
+        
+        if groq_key:
+            st.success("Groq: Connected")
+        else:
+            st.info("Groq: Not configured")
+    
+    return uploaded_files
+
+
+def render_statistics():
+    """Render the statistics panel."""
+    repo = st.session_state.repository
+    stats = repo.get_statistics()
+    
+    # Main stats row
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{stats['total_documents']}</div>
+            <div class="stat-label">Documents</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{stats['total_facts']}</div>
+            <div class="stat-label">Total Facts</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        avg_conf = stats['average_confidence']
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{avg_conf:.0%}</div>
+            <div class="stat-label">Avg Confidence</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        high_importance = stats['importance_breakdown'].get('high', 0)
+        st.markdown(f"""
+        <div class="stat-card">
+            <div class="stat-value">{high_importance}</div>
+            <div class="stat-label">High Priority</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Importance breakdown
+    if stats['total_facts'] > 0:
+        st.markdown("### Importance Breakdown")
+        
+        breakdown = stats['importance_breakdown']
+        total = sum(breakdown.values())
+        
+        if total > 0:
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                high_pct = breakdown.get('high', 0) / total * 100
+                st.metric("High", f"{breakdown.get('high', 0)}", f"{high_pct:.1f}%")
+            
+            with col2:
+                med_pct = breakdown.get('medium', 0) / total * 100
+                st.metric("Medium", f"{breakdown.get('medium', 0)}", f"{med_pct:.1f}%")
+            
+            with col3:
+                low_pct = breakdown.get('low', 0) / total * 100
+                st.metric("Low", f"{breakdown.get('low', 0)}", f"{low_pct:.1f}%")
+
+
+def render_filters():
+    """Render the filter controls."""
+    repo = st.session_state.repository
+    stats = repo.get_statistics()
+    
+    st.markdown("### 🔍 Filters")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        # Source document filter
+        source_options = ["All Documents"] + stats.get('source_documents', [])
+        selected_source = st.selectbox(
+            "Source Document",
+            options=source_options,
+        )
+    
+    with col2:
+        # Importance filter
+        importance_options = ["All", "high", "medium", "low"]
+        selected_importance = st.selectbox(
+            "Importance",
+            options=importance_options,
+        )
+    
+    with col3:
+        # Chapter filter
+        chapter_options = ["All Chapters"] + STANDARD_CHAPTERS
+        selected_chapter = st.selectbox(
+            "Chapter Relevance",
+            options=chapter_options,
+        )
+    
+    with col4:
+        # Search box
+        search_query = st.text_input(
+            "Search Facts",
+            placeholder="Enter keywords...",
+        )
+    
+    return selected_source, selected_importance, selected_chapter, search_query
+
+
+def render_fact_table(
+    selected_source: str,
+    selected_importance: str,
+    selected_chapter: str,
+    search_query: str,
+):
+    """Render the main fact table."""
+    repo = st.session_state.repository
+    
+    # Get all facts
+    facts = repo.get_all_facts()
+    
+    if not facts:
+        st.info("📭 No facts in the database yet. Upload documents to get started!")
+        return
+    
+    # Apply filters
+    filtered_facts = facts
+    
+    # Source filter
+    if selected_source != "All Documents":
+        filtered_facts = [
+            f for f in filtered_facts 
+            if selected_source in f.source_documents
+        ]
+    
+    # Importance filter
+    if selected_importance != "All":
+        filtered_facts = [
+            f for f in filtered_facts 
+            if f.importance == selected_importance
+        ]
+    
+    # Chapter filter
+    if selected_chapter != "All Chapters":
+        filtered_facts = [
+            f for f in filtered_facts 
+            if f.chapter_relevance.get(selected_chapter, 0) >= 0.5
+        ]
+    
+    # Search filter
+    if search_query:
+        search_lower = search_query.lower()
+        filtered_facts = [
+            f for f in filtered_facts 
+            if search_lower in f.content.lower()
+        ]
+    
+    # Display count
+    st.markdown(f"**Showing {len(filtered_facts)} of {len(facts)} facts**")
+    
+    if not filtered_facts:
+        st.warning("No facts match the current filters.")
+        return
+    
+    # Convert to DataFrame for display
+    display_data = []
+    for fact in filtered_facts:
+        top_chapters = fact.get_top_chapters(3)
+        top_chapters_str = ", ".join(
+            f"{ch} ({score:.0%})" for ch, score in top_chapters if score > 0.3
+        ) or "General"
+        
+        display_data.append({
+            "ID": fact.id[:8],
+            "Content": fact.content[:300] + ("..." if len(fact.content) > 300 else ""),
+            "Source(s)": ", ".join(fact.source_documents),
+            "Confidence": f"{fact.confidence:.0%}",
+            "Importance": fact.importance.upper(),
+            "Top Chapters": top_chapters_str,
+            "Usage": fact.usage_count,
+        })
+    
+    df = pd.DataFrame(display_data)
+    
+    # Configure column widths
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "ID": st.column_config.TextColumn("ID", width="small"),
+            "Content": st.column_config.TextColumn("Fact Content", width="large"),
+            "Source(s)": st.column_config.TextColumn("Source", width="medium"),
+            "Confidence": st.column_config.TextColumn("Confidence", width="small"),
+            "Importance": st.column_config.TextColumn("Importance", width="small"),
+            "Top Chapters": st.column_config.TextColumn("Relevant Chapters", width="medium"),
+            "Usage": st.column_config.NumberColumn("Uses", width="small"),
+        },
+    )
+    
+    # Export option
+    if st.button("📥 Export to CSV"):
+        # Full export with all fields
+        export_data = [f.model_dump() for f in filtered_facts]
+        export_df = pd.DataFrame(export_data)
+        
+        # Convert to CSV
+        csv = export_df.to_csv(index=False)
+        
+        st.download_button(
+            label="Download CSV",
+            data=csv,
+            file_name=f"fact_bank_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+        )
+
+
+def render_chapter_analysis():
+    """Render chapter-based analysis."""
+    repo = st.session_state.repository
+    facts = repo.get_all_facts()
+    
+    if not facts:
+        return
+    
+    st.markdown("### 📑 Chapter Analysis")
+    
+    chapter_stats = get_chapter_summary(facts)
+    
+    # Create summary table
+    chapter_data = []
+    for chapter, stats in chapter_stats.items():
+        chapter_data.append({
+            "Chapter": chapter,
+            "Facts": stats['fact_count'],
+            "Avg Confidence": f"{stats['avg_confidence']:.0%}",
+            "High": stats['importance_breakdown']['high'],
+            "Medium": stats['importance_breakdown']['medium'],
+            "Low": stats['importance_breakdown']['low'],
+        })
+    
+    chapter_df = pd.DataFrame(chapter_data)
+    
+    st.dataframe(
+        chapter_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def main():
+    """Main application entry point."""
+    render_header()
+    
+    # Sidebar
+    uploaded_files = render_sidebar()
+    
+    # Main content
+    tab1, tab2 = st.tabs(["📊 Fact Bank", "📈 Analytics"])
+    
+    with tab1:
+        render_statistics()
+        st.divider()
+        
+        selected_source, selected_importance, selected_chapter, search_query = render_filters()
+        st.divider()
+        
+        render_fact_table(selected_source, selected_importance, selected_chapter, search_query)
+    
+    with tab2:
+        render_statistics()
+        st.divider()
+        render_chapter_analysis()
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="tests/__init__.py">
+"""Test suite for Factor."""
+</file>
+
+<file path="tests/test_embeddings.py">
+"""
+Tests for the embeddings and deduplication module.
+
+Run with: pytest tests/test_embeddings.py -v
+"""
+
+import pytest
+import numpy as np
+
+from src.utils.embeddings import (
+    cosine_similarity,
+    cosine_similarity_matrix,
+    find_duplicate_pairs,
+)
+
+
+class TestCosineSimilarity:
+    """Tests for cosine similarity functions."""
+    
+    def test_identical_vectors(self):
+        """Test similarity of identical vectors is 1.0."""
+        vec = [1.0, 2.0, 3.0]
+        
+        similarity = cosine_similarity(vec, vec)
+        
+        assert similarity == pytest.approx(1.0, rel=1e-6)
+    
+    def test_orthogonal_vectors(self):
+        """Test similarity of orthogonal vectors is 0.0."""
+        vec1 = [1.0, 0.0, 0.0]
+        vec2 = [0.0, 1.0, 0.0]
+        
+        similarity = cosine_similarity(vec1, vec2)
+        
+        assert similarity == pytest.approx(0.0, abs=1e-6)
+    
+    def test_opposite_vectors(self):
+        """Test similarity of opposite vectors is -1.0."""
+        vec1 = [1.0, 0.0, 0.0]
+        vec2 = [-1.0, 0.0, 0.0]
+        
+        similarity = cosine_similarity(vec1, vec2)
+        
+        assert similarity == pytest.approx(-1.0, rel=1e-6)
+    
+    def test_zero_vector(self):
+        """Test similarity with zero vector is 0.0."""
+        vec1 = [1.0, 2.0, 3.0]
+        vec2 = [0.0, 0.0, 0.0]
+        
+        similarity = cosine_similarity(vec1, vec2)
+        
+        assert similarity == 0.0
+
+
+class TestCosineSimilarityMatrix:
+    """Tests for batch similarity computation."""
+    
+    def test_identity_diagonal(self):
+        """Test that diagonal of similarity matrix is all 1.0."""
+        embeddings = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        
+        matrix = cosine_similarity_matrix(embeddings)
+        
+        for i in range(3):
+            assert matrix[i, i] == pytest.approx(1.0, rel=1e-6)
+    
+    def test_symmetry(self):
+        """Test that similarity matrix is symmetric."""
+        embeddings = [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ]
+        
+        matrix = cosine_similarity_matrix(embeddings)
+        
+        assert matrix[0, 1] == pytest.approx(matrix[1, 0], rel=1e-6)
+        assert matrix[0, 2] == pytest.approx(matrix[2, 0], rel=1e-6)
+        assert matrix[1, 2] == pytest.approx(matrix[2, 1], rel=1e-6)
+
+
+class TestFindDuplicatePairs:
+    """Tests for duplicate detection."""
+    
+    def test_no_duplicates(self):
+        """Test with no duplicates (orthogonal vectors)."""
+        embeddings = [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        
+        pairs = find_duplicate_pairs(embeddings, threshold=0.85)
+        
+        assert len(pairs) == 0
+    
+    def test_finds_duplicates(self):
+        """Test finding duplicate pairs."""
+        # Very similar vectors
+        embeddings = [
+            [1.0, 0.0, 0.0],
+            [0.99, 0.1, 0.0],  # Very similar to first
+            [0.0, 1.0, 0.0],  # Different
+        ]
+        
+        pairs = find_duplicate_pairs(embeddings, threshold=0.85)
+        
+        assert len(pairs) == 1
+        assert pairs[0][0] == 0
+        assert pairs[0][1] == 1
+        assert pairs[0][2] > 0.85
+    
+    def test_single_embedding(self):
+        """Test with single embedding returns no pairs."""
+        embeddings = [[1.0, 2.0, 3.0]]
+        
+        pairs = find_duplicate_pairs(embeddings, threshold=0.85)
+        
+        assert len(pairs) == 0
+    
+    def test_empty_embeddings(self):
+        """Test with empty list returns no pairs."""
+        pairs = find_duplicate_pairs([], threshold=0.85)
+        
+        assert len(pairs) == 0
+    
+    def test_threshold_affects_results(self):
+        """Test that threshold changes results."""
+        embeddings = [
+            [1.0, 0.0, 0.0],
+            [0.9, 0.4, 0.0],  # Moderately similar
+        ]
+        
+        # Normalize for proper cosine similarity
+        norm1 = np.linalg.norm(embeddings[0])
+        norm2 = np.linalg.norm(embeddings[1])
+        embeddings[0] = [x / norm1 for x in embeddings[0]]
+        embeddings[1] = [x / norm2 for x in embeddings[1]]
+        
+        # With high threshold - no duplicates
+        pairs_high = find_duplicate_pairs(embeddings, threshold=0.95)
+        
+        # With low threshold - finds duplicates  
+        pairs_low = find_duplicate_pairs(embeddings, threshold=0.5)
+        
+        # Low threshold should find more or equal duplicates
+        assert len(pairs_low) >= len(pairs_high)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+</file>
+
+<file path="tests/test_extraction.py">
+"""
+Tests for the extraction module.
+
+Run with: pytest tests/test_extraction.py -v
+"""
+
+import pytest
+from pathlib import Path
+
+from src.extraction.normalizer import (
+    ExtractedDocument,
+    Section,
+    ContentType,
+    normalize_to_prompt,
+)
+from src.storage.models import (
+    Fact,
+    Document,
+    SourceType,
+    ImportanceLevel,
+    STANDARD_CHAPTERS,
+    BASE_CONFIDENCE_SCORES,
+)
+from src.scoring.scorer import FactScorer, get_chapter_summary
+
+
+class TestExtractedDocument:
+    """Tests for ExtractedDocument dataclass."""
+    
+    def test_create_document(self):
+        """Test creating an ExtractedDocument."""
+        doc = ExtractedDocument(
+            filename="test.pdf",
+            file_type="pdf",
+        )
+        
+        assert doc.filename == "test.pdf"
+        assert doc.file_type == "pdf"
+        assert doc.sections == []
+        assert doc.total_pages is None
+    
+    def test_add_section(self):
+        """Test adding sections to a document."""
+        doc = ExtractedDocument(
+            filename="test.pdf",
+            file_type="pdf",
+        )
+        
+        doc.add_section(
+            content="Sample text content",
+            content_type=ContentType.PROSE,
+            page_or_sheet=1,
+        )
+        
+        doc.add_section(
+            content="| Col1 | Col2 |\n| --- | --- |\n| A | B |",
+            content_type=ContentType.TABLE,
+            page_or_sheet=2,
+            title="Sample Table",
+        )
+        
+        assert len(doc.sections) == 2
+        assert len(doc.get_prose_only()) == 1
+        assert len(doc.get_tables_only()) == 1
+    
+    def test_get_full_text(self):
+        """Test getting full text from document."""
+        doc = ExtractedDocument(
+            filename="test.pdf",
+            file_type="pdf",
+        )
+        
+        doc.add_section(
+            content="First section",
+            content_type=ContentType.PROSE,
+            page_or_sheet=1,
+        )
+        
+        doc.add_section(
+            content="Second section",
+            content_type=ContentType.PROSE,
+            page_or_sheet=2,
+        )
+        
+        full_text = doc.get_full_text()
+        assert "First section" in full_text
+        assert "Second section" in full_text
+
+
+class TestNormalizeToPrompt:
+    """Tests for normalize_to_prompt function."""
+    
+    def test_normalize_basic_document(self):
+        """Test normalizing a basic document."""
+        doc = ExtractedDocument(
+            filename="report.pdf",
+            file_type="pdf",
+            total_pages=5,
+        )
+        
+        doc.add_section(
+            content="Company overview text.",
+            content_type=ContentType.PROSE,
+            page_or_sheet=1,
+        )
+        
+        result = normalize_to_prompt(doc)
+        
+        assert "report.pdf" in result
+        assert "PDF" in result
+        assert "Company overview text" in result
+        assert "Text Content" in result
+
+
+class TestFactModel:
+    """Tests for the Fact Pydantic model."""
+    
+    def test_create_fact(self):
+        """Test creating a Fact."""
+        fact = Fact(
+            id="test-123",
+            content="The company generated $5M in revenue in 2024.",
+            source_documents=["presentation.pdf"],
+            source_type=SourceType.COMPANY_PRESENTATION,
+            confidence=0.75,
+            importance=ImportanceLevel.HIGH,
+            chapter_relevance={"Financial": 0.9, "Summary": 0.7},
+        )
+        
+        assert fact.id == "test-123"
+        assert fact.confidence == 0.75
+        assert fact.importance == ImportanceLevel.HIGH.value
+        assert fact.usage_count == 0
+    
+    def test_get_top_chapters(self):
+        """Test getting top relevant chapters."""
+        fact = Fact(
+            id="test-123",
+            content="Test fact",
+            source_documents=["test.pdf"],
+            source_type=SourceType.MARKET_RESEARCH,
+            confidence=0.8,
+            importance=ImportanceLevel.MEDIUM,
+            chapter_relevance={
+                "Financial": 0.9,
+                "Market": 0.7,
+                "Legal": 0.3,
+                "Technical": 0.1,
+            },
+        )
+        
+        top = fact.get_top_chapters(2)
+        
+        assert len(top) == 2
+        assert top[0][0] == "Financial"
+        assert top[0][1] == 0.9
+        assert top[1][0] == "Market"
+    
+    def test_is_relevant_to_chapter(self):
+        """Test chapter relevance check."""
+        fact = Fact(
+            id="test-123",
+            content="Test fact",
+            source_documents=["test.pdf"],
+            source_type=SourceType.FINANCIALS,
+            confidence=0.9,
+            importance=ImportanceLevel.HIGH,
+            chapter_relevance={
+                "Financial": 0.9,
+                "Market": 0.4,
+            },
+        )
+        
+        assert fact.is_relevant_to_chapter("Financial", threshold=0.5)
+        assert not fact.is_relevant_to_chapter("Market", threshold=0.5)
+        assert fact.is_relevant_to_chapter("Market", threshold=0.3)
+    
+    def test_to_display_dict(self):
+        """Test converting fact to display dictionary."""
+        fact = Fact(
+            id="abcd1234-5678-90ef-ghij-klmnopqrstuv",
+            content="Revenue was $10M in Q4 2024.",
+            source_documents=["report.pdf", "data.xlsx"],
+            source_type=SourceType.FINANCIALS,
+            confidence=0.92,
+            importance=ImportanceLevel.HIGH,
+            chapter_relevance={"Financial": 0.95, "Summary": 0.6},
+        )
+        
+        display = fact.to_display_dict()
+        
+        assert display["ID"] == "abcd1234"
+        assert "Revenue" in display["Content"]
+        assert "report.pdf" in display["Source(s)"]
+        assert display["Confidence"] == "92%"
+
+
+class TestFactScorer:
+    """Tests for the FactScorer class."""
+    
+    def test_apply_confidence_adjustment(self):
+        """Test applying confidence adjustments."""
+        scorer = FactScorer()
+        
+        fact = Fact(
+            id="test",
+            content="Test",
+            source_documents=["test.pdf"],
+            source_type=SourceType.COMPANY_PRESENTATION,
+            confidence=0.70,
+            importance=ImportanceLevel.MEDIUM,
+            chapter_relevance={},
+        )
+        
+        # Positive adjustment
+        adjusted = scorer.apply_confidence_adjustment(fact, 0.10)
+        assert adjusted.confidence == 0.80
+        
+        # Clamp to max
+        fact.confidence = 0.95
+        adjusted = scorer.apply_confidence_adjustment(fact, 0.10)
+        assert adjusted.confidence == 1.0
+    
+    def test_validate_fact(self):
+        """Test fact validation."""
+        scorer = FactScorer()
+        
+        # Valid fact
+        valid_fact = Fact(
+            id="test",
+            content="A valid fact with enough content.",
+            source_documents=["test.pdf"],
+            source_type=SourceType.MARKET_RESEARCH,
+            confidence=0.85,
+            importance=ImportanceLevel.HIGH,
+            chapter_relevance={"Financial": 0.8},
+        )
+        
+        issues = scorer.validate_fact(valid_fact)
+        assert len(issues) == 0
+        
+        # Invalid fact (too short content)
+        invalid_fact = Fact(
+            id="test",
+            content="Hi",
+            source_documents=["test.pdf"],
+            source_type=SourceType.MARKET_RESEARCH,
+            confidence=0.85,
+            importance=ImportanceLevel.HIGH,
+            chapter_relevance={},
+        )
+        
+        issues = scorer.validate_fact(invalid_fact)
+        assert len(issues) > 0
+
+
+class TestBaseConfidenceScores:
+    """Tests for base confidence score constants."""
+    
+    def test_financials_highest(self):
+        """Test that financials have highest base confidence."""
+        assert BASE_CONFIDENCE_SCORES[SourceType.FINANCIALS] == 0.90
+    
+    def test_market_research_middle(self):
+        """Test market research confidence."""
+        assert BASE_CONFIDENCE_SCORES[SourceType.MARKET_RESEARCH] == 0.85
+    
+    def test_company_presentation_lowest(self):
+        """Test company presentation has lowest confidence."""
+        assert BASE_CONFIDENCE_SCORES[SourceType.COMPANY_PRESENTATION] == 0.70
+
+
+class TestStandardChapters:
+    """Tests for standard chapters constant."""
+    
+    def test_all_chapters_present(self):
+        """Test all expected chapters are defined."""
+        expected = [
+            "Financial", "Legal", "Market", "Technical", "Team",
+            "Competitive", "Risk", "Operations", "Strategy", "Summary"
+        ]
+        
+        assert len(STANDARD_CHAPTERS) == 10
+        for chapter in expected:
+            assert chapter in STANDARD_CHAPTERS
+
+
+class TestChapterSummary:
+    """Tests for chapter summary function."""
+    
+    def test_empty_facts(self):
+        """Test with empty fact list."""
+        summary = get_chapter_summary([])
+        
+        assert len(summary) == 10
+        for chapter in STANDARD_CHAPTERS:
+            assert summary[chapter]["fact_count"] == 0
+    
+    def test_with_facts(self):
+        """Test summary with actual facts."""
+        facts = [
+            Fact(
+                id="1",
+                content="Financial fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.9,
+                importance=ImportanceLevel.HIGH,
+                chapter_relevance={"Financial": 0.95, "Summary": 0.6},
+            ),
+            Fact(
+                id="2",
+                content="Market fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.MARKET_RESEARCH,
+                confidence=0.8,
+                importance=ImportanceLevel.MEDIUM,
+                chapter_relevance={"Market": 0.85, "Competitive": 0.6},
+            ),
+        ]
+        
+        summary = get_chapter_summary(facts)
+        
+        assert summary["Financial"]["fact_count"] == 1
+        assert summary["Market"]["fact_count"] == 1
+        assert summary["Summary"]["fact_count"] == 1  # 0.6 >= 0.5
+        assert summary["Legal"]["fact_count"] == 0
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+</file>
+
+<file path="tests/test_repository.py">
+"""
+Tests for the storage repository.
+
+Run with: pytest tests/test_repository.py -v
+"""
+
+import os
+import pytest
+import tempfile
+from datetime import datetime
+
+from src.storage.repository import FactRepository
+from src.storage.models import Fact, Document, SourceType, ImportanceLevel
+
+
+@pytest.fixture
+def temp_db():
+    """Create a temporary database for testing."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        db_path = f.name
+    
+    yield db_path
+    
+    # Cleanup
+    if os.path.exists(db_path):
+        os.unlink(db_path)
+
+
+@pytest.fixture
+def repo(temp_db):
+    """Create a repository with temporary database."""
+    return FactRepository(db_path=temp_db)
+
+
+@pytest.fixture
+def sample_fact():
+    """Create a sample fact for testing."""
+    return Fact(
+        id="test-fact-001",
+        content="The company achieved $10M ARR in Q4 2024.",
+        source_documents=["presentation.pdf"],
+        source_type=SourceType.COMPANY_PRESENTATION,
+        confidence=0.75,
+        importance=ImportanceLevel.HIGH,
+        chapter_relevance={
+            "Financial": 0.95,
+            "Summary": 0.7,
+            "Strategy": 0.5,
+        },
+        extraction_timestamp=datetime(2024, 12, 1, 10, 0, 0),
+        usage_count=0,
+        used_in_chapters=[],
+    )
+
+
+class TestFactRepository:
+    """Tests for FactRepository class."""
+    
+    def test_init_creates_tables(self, repo):
+        """Test that initialization creates required tables."""
+        # If we can insert and retrieve, tables exist
+        fact = Fact(
+            id="test",
+            content="Test fact",
+            source_documents=["test.pdf"],
+            source_type=SourceType.FINANCIALS,
+            confidence=0.9,
+            importance=ImportanceLevel.MEDIUM,
+            chapter_relevance={},
+        )
+        
+        repo.insert_fact(fact)
+        retrieved = repo.get_fact("test")
+        
+        assert retrieved is not None
+        assert retrieved.content == "Test fact"
+    
+    def test_insert_and_get_fact(self, repo, sample_fact):
+        """Test inserting and retrieving a fact."""
+        repo.insert_fact(sample_fact)
+        
+        retrieved = repo.get_fact(sample_fact.id)
+        
+        assert retrieved is not None
+        assert retrieved.id == sample_fact.id
+        assert retrieved.content == sample_fact.content
+        assert retrieved.confidence == sample_fact.confidence
+        assert retrieved.importance == sample_fact.importance
+    
+    def test_get_nonexistent_fact(self, repo):
+        """Test getting a fact that doesn't exist."""
+        result = repo.get_fact("nonexistent-id")
+        assert result is None
+    
+    def test_insert_facts_batch(self, repo):
+        """Test batch inserting multiple facts."""
+        facts = [
+            Fact(
+                id=f"fact-{i}",
+                content=f"Test fact {i}",
+                source_documents=["test.pdf"],
+                source_type=SourceType.MARKET_RESEARCH,
+                confidence=0.8,
+                importance=ImportanceLevel.MEDIUM,
+                chapter_relevance={"Market": 0.7},
+            )
+            for i in range(5)
+        ]
+        
+        count = repo.insert_facts(facts)
+        
+        assert count == 5
+        
+        all_facts = repo.get_all_facts()
+        assert len(all_facts) == 5
+    
+    def test_get_facts_by_importance(self, repo):
+        """Test filtering facts by importance."""
+        facts = [
+            Fact(
+                id="high-1",
+                content="High importance fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.9,
+                importance=ImportanceLevel.HIGH,
+                chapter_relevance={},
+            ),
+            Fact(
+                id="medium-1",
+                content="Medium importance fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.9,
+                importance=ImportanceLevel.MEDIUM,
+                chapter_relevance={},
+            ),
+            Fact(
+                id="low-1",
+                content="Low importance fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.9,
+                importance=ImportanceLevel.LOW,
+                chapter_relevance={},
+            ),
+        ]
+        
+        repo.insert_facts(facts)
+        
+        high_facts = repo.get_facts_by_importance(ImportanceLevel.HIGH)
+        assert len(high_facts) == 1
+        assert high_facts[0].id == "high-1"
+        
+        medium_facts = repo.get_facts_by_importance("medium")
+        assert len(medium_facts) == 1
+    
+    def test_get_facts_by_chapter(self, repo):
+        """Test filtering facts by chapter relevance."""
+        facts = [
+            Fact(
+                id="financial-1",
+                content="Financial fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.9,
+                importance=ImportanceLevel.HIGH,
+                chapter_relevance={"Financial": 0.95, "Summary": 0.3},
+            ),
+            Fact(
+                id="market-1",
+                content="Market fact",
+                source_documents=["test.pdf"],
+                source_type=SourceType.MARKET_RESEARCH,
+                confidence=0.85,
+                importance=ImportanceLevel.MEDIUM,
+                chapter_relevance={"Market": 0.9, "Financial": 0.2},
+            ),
+        ]
+        
+        repo.insert_facts(facts)
+        
+        financial_facts = repo.get_facts_by_chapter("Financial", min_relevance=0.5)
+        assert len(financial_facts) == 1
+        assert financial_facts[0].id == "financial-1"
+        
+        market_facts = repo.get_facts_by_chapter("Market", min_relevance=0.5)
+        assert len(market_facts) == 1
+    
+    def test_search_facts(self, repo):
+        """Test searching facts by content."""
+        facts = [
+            Fact(
+                id="1",
+                content="Revenue grew by 50% year over year.",
+                source_documents=["test.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.9,
+                importance=ImportanceLevel.HIGH,
+                chapter_relevance={},
+            ),
+            Fact(
+                id="2",
+                content="The market size is estimated at $5B.",
+                source_documents=["test.pdf"],
+                source_type=SourceType.MARKET_RESEARCH,
+                confidence=0.85,
+                importance=ImportanceLevel.MEDIUM,
+                chapter_relevance={},
+            ),
+        ]
+        
+        repo.insert_facts(facts)
+        
+        revenue_facts = repo.search_facts("revenue")
+        assert len(revenue_facts) == 1
+        assert "Revenue" in revenue_facts[0].content
+        
+        market_facts = repo.search_facts("market")
+        assert len(market_facts) == 1
+    
+    def test_update_usage(self, repo, sample_fact):
+        """Test updating fact usage count."""
+        repo.insert_fact(sample_fact)
+        
+        # Update usage
+        result = repo.update_usage(sample_fact.id, chapter="Financial")
+        assert result is True
+        
+        updated = repo.get_fact(sample_fact.id)
+        assert updated.usage_count == 1
+        assert "Financial" in updated.used_in_chapters
+        
+        # Update again
+        repo.update_usage(sample_fact.id, chapter="Summary")
+        updated = repo.get_fact(sample_fact.id)
+        assert updated.usage_count == 2
+        assert "Summary" in updated.used_in_chapters
+    
+    def test_delete_fact(self, repo, sample_fact):
+        """Test deleting a fact."""
+        repo.insert_fact(sample_fact)
+        
+        # Verify it exists
+        assert repo.get_fact(sample_fact.id) is not None
+        
+        # Delete
+        result = repo.delete_fact(sample_fact.id)
+        assert result is True
+        
+        # Verify it's gone
+        assert repo.get_fact(sample_fact.id) is None
+    
+    def test_get_statistics(self, repo):
+        """Test getting repository statistics."""
+        facts = [
+            Fact(
+                id="1",
+                content="High fact",
+                source_documents=["doc1.pdf"],
+                source_type=SourceType.FINANCIALS,
+                confidence=0.95,
+                importance=ImportanceLevel.HIGH,
+                chapter_relevance={},
+            ),
+            Fact(
+                id="2",
+                content="Medium fact",
+                source_documents=["doc2.pdf"],
+                source_type=SourceType.MARKET_RESEARCH,
+                confidence=0.85,
+                importance=ImportanceLevel.MEDIUM,
+                chapter_relevance={},
+            ),
+        ]
+        
+        repo.insert_facts(facts)
+        
+        # Insert documents
+        doc1 = Document(
+            id="doc1",
+            filename="doc1.pdf",
+            file_type="pdf",
+            source_type=SourceType.FINANCIALS,
+            raw_content="Content",
+        )
+        repo.insert_document(doc1)
+        
+        stats = repo.get_statistics()
+        
+        assert stats["total_facts"] == 2
+        assert stats["total_documents"] == 1
+        assert stats["importance_breakdown"]["high"] == 1
+        assert stats["importance_breakdown"]["medium"] == 1
+        assert 0.85 < stats["average_confidence"] < 0.95
+
+
+class TestDocumentRepository:
+    """Tests for document storage in repository."""
+    
+    def test_insert_and_get_document(self, repo):
+        """Test inserting and retrieving a document."""
+        doc = Document(
+            id="doc-001",
+            filename="annual_report.pdf",
+            file_type="pdf",
+            source_type=SourceType.FINANCIALS,
+            raw_content="Full document content here...",
+            page_count=25,
+        )
+        
+        repo.insert_document(doc)
+        
+        retrieved = repo.get_document("doc-001")
+        
+        assert retrieved is not None
+        assert retrieved.filename == "annual_report.pdf"
+        assert retrieved.page_count == 25
+    
+    def test_get_document_by_filename(self, repo):
+        """Test finding document by filename."""
+        doc = Document(
+            id="doc-002",
+            filename="market_research.pdf",
+            file_type="pdf",
+            source_type=SourceType.MARKET_RESEARCH,
+            raw_content="Research content",
+        )
+        
+        repo.insert_document(doc)
+        
+        retrieved = repo.get_document_by_filename("market_research.pdf")
+        
+        assert retrieved is not None
+        assert retrieved.id == "doc-002"
+    
+    def test_get_all_documents(self, repo):
+        """Test getting all documents."""
+        docs = [
+            Document(
+                id=f"doc-{i}",
+                filename=f"document_{i}.pdf",
+                file_type="pdf",
+                source_type=SourceType.COMPANY_PRESENTATION,
+                raw_content="Content",
+            )
+            for i in range(3)
+        ]
+        
+        for doc in docs:
+            repo.insert_document(doc)
+        
+        all_docs = repo.get_all_documents()
+        assert len(all_docs) == 3
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+</file>
+
+</files>
